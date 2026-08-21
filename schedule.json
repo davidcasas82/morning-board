@@ -3,20 +3,20 @@
   "clockMode": "shared",
   "notes": [
     "ONE shared household clock. Not a clock per kid. One alarm and one leaveBy per weekday.",
-    "Weekday household times. Not school bells.",
-    "Friday alarm 06:35 / leaveBy 07:45 is confirmed (example date 2026-08-21).",
-    "Monday–Thursday times are PLACEHOLDERS: earlier than Friday because Friday is the late start. David: replace them.",
-    "Saturday and Sunday are off. No weekend leave-by invented.",
-    "Leave-by already includes the buffer to get to school. Do not add bell times here unless we need them later."
+    "leaveBy is on-the-road time. Downstairs is 15 minutes before that.",
+    "Monday, Wednesday, Thursday: alarm 06:00 / on the road 07:10 (confirmed).",
+    "Tuesday is still a placeholder. David did not give Tuesday times.",
+    "Friday: alarm 06:30 / on the road 07:40 (confirmed late start).",
+    "Saturday and Sunday are off."
   ],
   "days": {
     "monday": {
       "enabled": true,
       "label": "School day",
-      "alarm": "06:15",
-      "leaveBy": "07:15",
-      "status": "placeholder",
-      "comment": "Guess only. Earlier than Friday. Fill in real alarm and leave-by."
+      "alarm": "06:00",
+      "leaveBy": "07:10",
+      "status": "confirmed",
+      "comment": "Alarm 6:00 AM. On the road 7:10 AM. Downstairs 6:55 AM."
     },
     "tuesday": {
       "enabled": true,
@@ -24,31 +24,31 @@
       "alarm": "06:15",
       "leaveBy": "07:15",
       "status": "placeholder",
-      "comment": "Guess only. Earlier than Friday. Fill in real alarm and leave-by."
+      "comment": "Not given with Mon/Wed/Thu. Still a guess. Fill in real alarm and on-the-road time."
     },
     "wednesday": {
       "enabled": true,
       "label": "School day",
-      "alarm": "06:15",
-      "leaveBy": "07:15",
-      "status": "placeholder",
-      "comment": "Guess only. Earlier than Friday. Fill in real alarm and leave-by. Note here if Wednesday is actually different."
+      "alarm": "06:00",
+      "leaveBy": "07:10",
+      "status": "confirmed",
+      "comment": "Alarm 6:00 AM. On the road 7:10 AM. Downstairs 6:55 AM."
     },
     "thursday": {
       "enabled": true,
       "label": "School day",
-      "alarm": "06:15",
-      "leaveBy": "07:15",
-      "status": "placeholder",
-      "comment": "Guess only. Earlier than Friday. Fill in real alarm and leave-by."
+      "alarm": "06:00",
+      "leaveBy": "07:10",
+      "status": "confirmed",
+      "comment": "Alarm 6:00 AM. On the road 7:10 AM. Downstairs 6:55 AM."
     },
     "friday": {
       "enabled": true,
       "label": "Late start Friday",
-      "alarm": "06:35",
-      "leaveBy": "07:45",
+      "alarm": "06:30",
+      "leaveBy": "07:40",
       "status": "confirmed",
-      "comment": "Confirmed household example from Friday 2026-08-21. Leave the house by 7:45 AM at the latest."
+      "comment": "Alarm 6:30 AM. On the road 7:40 AM. Downstairs 7:25 AM."
     },
     "saturday": {
       "enabled": false,
