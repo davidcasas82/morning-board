@@ -1,8 +1,9 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
+  <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-store">
 <title>Morning board</title>
 <link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
 <style>
@@ -734,6 +735,7 @@
   <div class="sheet" onclick="event.stopPropagation()">
     <h2>WEEK FROM GITHUB</h2>
     <p class="hint">Alarm and on-the-road times come from schedule.json. Change them in the repo (or ask Grok) and push. This tablet does not save a private week. Downstairs is 15 minutes before on-the-road. Off days never count down.</p>
+    <p class="hint" id="scheduleStatus">Loading week from GitHub…</p>
     <div class="week-head">
       <span>Day</span><span>On</span><span>Alarm</span><span>On the road</span>
     </div>
@@ -742,7 +744,7 @@
     <h3>TODAY ONLY</h3>
     <p class="hint" id="modeHint">On-the-road override is this calendar date only. It does not change GitHub.</p>
     <label for="leaveInput">Today’s on-the-road time</label>
-    <input id="leaveInput" type="time" value="07:45">
+        <input id="leaveInput" type="time" value="07:40">
     <div class="row">
       <button type="button" id="applyLeave">Use this road time today</button>
       <button type="button" id="resetLeave">Clear today’s override</button>
@@ -941,13 +943,31 @@ function applyScheduleData(data) {
   return changed;
 }
 
+function setScheduleStatus(text) {
+  const el = document.getElementById('scheduleStatus');
+  if (el) el.textContent = text;
+}
+
 function fetchSchedule() {
-  return fetch('schedule.json', { cache: 'no-store' }).then(function (res) {
-    if (!res.ok) return;
+  const url = new URL('schedule.json', window.location.href);
+  url.searchParams.set('t', String(Date.now()));
+  return fetch(url.toString(), { cache: 'no-store' }).then(function (res) {
+    if (!res.ok) {
+      setScheduleStatus('Could not load schedule.json (' + res.status + '). Using built-in times.');
+      return;
+    }
     return res.json().then(function (data) {
-      if (applyScheduleData(data)) tickClock();
+      applyScheduleData(data);
+      setScheduleStatus('Loaded from GitHub. Fri alarm 6:30 · on the road 7:40.');
+      if (document.getElementById('sheetBg').classList.contains('open')) {
+        buildWeekRows();
+        document.getElementById('leaveInput').value = leaveByFor(now()) || '07:40';
+      }
+      tickClock();
     });
-  }).catch(function () {});
+  }).catch(function () {
+    setScheduleStatus('Could not load schedule.json. If this is a local file, open the GitHub URL instead.');
+  });
 }
 
 function getTodayOverride(d) {
