@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>Leave-by countdown</title>
+  <style>
+    :root {
+      --bg: #070708;
+      --ink: #f4f4f2;
+      --muted: #9a9a96;
+      --panel: #161618;
+      --line: #2a2a2e;
+      --btn: #2c2c31;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Segoe UI", system-ui, sans-serif;
+      overflow: hidden;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: manipulation;
+    }
+
+    body {
+      min-height: 100dvh;
+    }
+
+    button {
+      font: inherit;
+      color: inherit;
+      background: var(--btn);
+      border: 0;
+      border-radius: 14px;
+      min-height: 52px;
+      padding: 0.7rem 1.1rem;
+    }
+
+    button:active { transform: scale(0.98); }
+
+    .screen {
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 4vh 4vw;
+      text-align: center;
+    }
+
+    .eyebrow {
+      font-size: clamp(14px, 3.2vmin, 28px);
+      letter-spacing: 0.28em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .time {
+      font-size: clamp(64px, 28vmin, 280px);
+      font-weight: 800;
+      line-height: 0.86;
+      letter-spacing: -0.045em;
+      font-variant-numeric: tabular-nums;
+      margin: 3vh 0 2vh;
+    }
+
+    .sub {
+      font-size: clamp(16px, 3.6vmin, 32px);
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .now-word {
+      font-size: clamp(72px, 22vmin, 220px);
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      line-height: 0.9;
+    }
+
+    body[data-band="plenty"] { --ink: #f4f4f2; }
+    body[data-band="amber"] { --ink: #ffb020; --muted: #c4923a; }
+    body[data-band="orange"] { --ink: #ff6a2a; --muted: #c45a2a; }
+    body[data-band="red"] { --ink: #ff2a2a; --muted: #c84444; }
+    body[data-band="late"] { --ink: #fff; --bg: #b00000; }
+
+    body[data-band="red"] .time {
+      animation: pulse 1s ease-in-out infinite;
+    }
+
+    body[data-band="late"] {
+      animation: flash 0.7s steps(2) infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.03); opacity: 0.88; }
+    }
+
+    @keyframes flash {
+      0%, 49% { background: #c40000; }
+      50%, 100% { background: #1a0000; }
+    }
+
+    .gear {
+      position: fixed;
+      top: 0;
+      right: 0;
+      width: 72px;
+      height: 72px;
+      border-radius: 0 0 0 22px;
+      background: transparent;
+      color: #5a5a5e;
+      font-size: 28px;
+      min-height: 0;
+      z-index: 3;
+    }
+
+    .overlay, .sheet-bg {
+      position: fixed;
+      inset: 0;
+      z-index: 4;
+    }
+
+    .overlay {
+      background: #070708;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      gap: 2rem;
+      padding: 2rem;
+    }
+
+    .overlay h1 {
+      margin: 0;
+      font-size: clamp(32px, 8vmin, 72px);
+      letter-spacing: -0.03em;
+    }
+
+    .overlay p {
+      margin: 0;
+      max-width: 22em;
+      font-size: clamp(16px, 3.4vmin, 24px);
+      color: #b8b8b4;
+      line-height: 1.4;
+    }
+
+    .go {
+      min-width: min(90vw, 420px);
+      min-height: 72px;
+      font-size: 1.25rem;
+      font-weight: 700;
+      background: #e8e8e4;
+      color: #111;
+    }
+
+    .sheet-bg {
+      background: rgba(0, 0, 0, 0.55);
+      display: none;
+      align-items: flex-end;
+    }
+
+    .sheet-bg.open { display: flex; }
+
+    .sheet {
+      width: 100%;
+      background: var(--panel);
+      border-top: 1px solid var(--line);
+      border-radius: 20px 20px 0 0;
+      padding: 1.25rem 1.25rem calc(1.25rem + env(safe-area-inset-bottom));
+      text-align: left;
+    }
+
+    .sheet h2 {
+      margin: 0 0 0.75rem;
+      font-size: 1.15rem;
+    }
+
+    .row {
+      display: flex;
+      gap: 0.6rem;
+      flex-wrap: wrap;
+      margin: 0.6rem 0;
+    }
+
+    .row button { flex: 1 1 140px; }
+
+    label {
+      display: block;
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-bottom: 0.35rem;
+    }
+
+    input[type="time"] {
+      width: 100%;
+      min-height: 52px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #0f0f11;
+      color: var(--ink);
+      font-size: 1.2rem;
+      padding: 0 0.8rem;
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.35;
+      margin: 0.4rem 0 0.8rem;
+    }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body data-band="plenty">
+  <button class="gear" id="gear" type="button" aria-label="Adult settings">⚙</button>
+
+  <div class="overlay" id="start">
+    <p class="eyebrow">Friday demo</p>
+    <h1>Leave-by countdown</h1>
+    <p>One shared household clock. Alarm 6:35 · leave the house by 7:45. Tap to go full screen. Edit weekday times later in schedule.json.</p>
+    <button class="go" id="startBtn" type="button">Tap to start</button>
+  </div>
+
+  <main class="screen" id="clock" hidden>
+    <div class="eyebrow" id="eyebrow">Leave in</div>
+    <div class="time" id="time">70:00</div>
+    <div class="sub" id="sub">Fri · leave by 7:45 AM</div>
+  </main>
+
+  <div class="sheet-bg" id="sheetBg">
+    <div class="sheet" onclick="event.stopPropagation()">
+      <h2>Today (adult)</h2>
+      <p class="hint" id="modeHint">Demo pretends it is Friday 6:35 so you can see the countdown any time of day.</p>
+      <label for="leaveInput">Today’s leave-by</label>
+      <input id="leaveInput" type="time" value="07:45">
+      <div class="row">
+        <button type="button" id="applyLeave">Use this leave-by</button>
+        <button type="button" id="resetLeave">Friday default 7:45</button>
+      </div>
+      <div class="row">
+        <button type="button" id="jumpFive">Jump to 5 min left</button>
+        <button type="button" id="jumpZero">Hit zero</button>
+      </div>
+      <div class="row">
+        <button type="button" id="toggleLive">Use real clock</button>
+        <button type="button" id="closeSheet">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Friday example inlined so this file works from file:// without fetching schedule.json.
+    const FRIDAY = { alarm: "06:35", leaveBy: "07:45", label: "Late start Friday" };
+
+    const $ = (id) => document.getElementById(id);
+    const start = $("start");
+    const clock = $("clock");
+    const timeEl = $("time");
+    const eyebrow = $("eyebrow");
+    const sub = $("sub");
+    const sheetBg = $("sheetBg");
+    const leaveInput = $("leaveInput");
+    const modeHint = $("modeHint");
+
+    let live = false;
+    let leaveBy = FRIDAY.leaveBy;
+    let demoStartedAt = null;
+    let demoOffsetMs = 0;
+
+    function parseHM(hm) {
+      const [h, m] = hm.split(":").map(Number);
+      return { h, m };
+    }
+
+    function formatClock(hm) {
+      const { h, m } = parseHM(hm);
+      const suffix = h >= 12 ? "PM" : "AM";
+      const h12 = h % 12 || 12;
+      return h12 + ":" + String(m).padStart(2, "0") + " " + suffix;
+    }
+
+    function todayAt(hm, base) {
+      const { h, m } = parseHM(hm);
+      const d = new Date(base.getTime());
+      d.setHours(h, m, 0, 0);
+      return d;
+    }
+
+    function pad(n) { return String(n).padStart(2, "0"); }
+
+    function remainingParts(ms) {
+      const late = ms < 0;
+      const abs = Math.abs(ms);
+      const totalSec = Math.floor(abs / 1000);
+      const minutes = Math.floor(totalSec / 60);
+      const seconds = totalSec % 60;
+      return { late, minutes, seconds, ms };
+    }
+
+    function bandFor(ms) {
+      if (ms <= 0) return "late";
+      if (ms <= 5 * 60 * 1000) return "red";
+      if (ms <= 10 * 60 * 1000) return "orange";
+      if (ms <= 20 * 60 * 1000) return "amber";
+      return "plenty";
+    }
+
+    function now() {
+      if (live) return new Date();
+      if (!demoStartedAt) return todayAt(FRIDAY.alarm, new Date());
+      return new Date(demoStartedAt.getTime() + (Date.now() - demoStartedAt) + demoOffsetMs);
+    }
+
+    function weekdayName(d) {
+      return d.toLocaleDateString("en-US", { weekday: "short" });
+    }
+
+    function render() {
+      const n = now();
+      const leave = todayAt(leaveBy, n);
+      const alarm = todayAt(FRIDAY.alarm, n);
+      const ms = leave.getTime() - n.getTime();
+      const parts = remainingParts(ms);
+      const band = bandFor(ms);
+      document.body.dataset.band = band;
+      document.body.style.background = "";
+
+      sub.textContent = weekdayName(n) + " · leave by " + formatClock(leaveBy);
+
+      if (!live && n < alarm && demoOffsetMs === 0) {
+        // Demo starts at alarm; this branch is for live mornings before 6:35.
+      }
+
+      if (live && n < alarm) {
+        eyebrow.textContent = "Countdown starts at";
+        timeEl.className = "time";
+        timeEl.textContent = formatClock(FRIDAY.alarm);
+        return;
+      }
+
+      if (parts.late) {
+        eyebrow.textContent = "Leave now";
+        timeEl.className = "now-word";
+        timeEl.textContent = "NOW";
+        sub.textContent = "+" + parts.minutes + ":" + pad(parts.seconds) + " late · " + formatClock(leaveBy);
+        return;
+      }
+
+      eyebrow.textContent = "Leave in";
+      timeEl.className = "time";
+      timeEl.textContent = parts.minutes + ":" + pad(parts.seconds);
+    }
+
+    function startDemo(fromAlarm) {
+      live = false;
+      demoOffsetMs = 0;
+      const wall = new Date();
+      demoStartedAt = todayAt(fromAlarm ? FRIDAY.alarm : leaveBy, wall);
+      // Align demo "now" to alarm (or leave-by if jumping), then let wall time advance it.
+      const intended = todayAt(fromAlarm ? FRIDAY.alarm : leaveBy, wall);
+      demoStartedAt = new Date(intended.getTime() - (Date.now() - Date.now()));
+      // Store the demo epoch as "this wall-clock instant maps to intended".
+      window._demoEpochWall = Date.now();
+      window._demoEpochSim = intended.getTime();
+      modeHint.textContent = "Demo pretends it is Friday morning. Use real clock for an actual school day.";
+      $("toggleLive").textContent = "Use real clock";
+    }
+
+    function simNow() {
+      if (live) return new Date();
+      const sim = window._demoEpochSim + (Date.now() - window._demoEpochWall) + demoOffsetMs;
+      return new Date(sim);
+    }
+
+    now = function () { return simNow(); };
+
+    function jumpToRemaining(msLeft) {
+      live = false;
+      const wall = new Date();
+      const leave = todayAt(leaveBy, wall);
+      window._demoEpochSim = leave.getTime() - msLeft;
+      window._demoEpochWall = Date.now();
+      demoOffsetMs = 0;
+      $("toggleLive").textContent = "Use real clock";
+      modeHint.textContent = "Demo jump. This is not the real time of day.";
+      render();
+    }
+
+    function enter() {
+      start.classList.add("hidden");
+      clock.hidden = false;
+      const el = document.documentElement;
+      if (el.requestFullscreen) el.requestFullscreen().catch(function () {});
+      startDemo(true);
+      render();
+    }
+
+    $("startBtn").addEventListener("click", enter);
+    $("gear").addEventListener("click", function () {
+      leaveInput.value = leaveBy;
+      sheetBg.classList.add("open");
+    });
+    sheetBg.addEventListener("click", function () { sheetBg.classList.remove("open"); });
+    $("closeSheet").addEventListener("click", function () { sheetBg.classList.remove("open"); });
+    $("applyLeave").addEventListener("click", function () {
+      if (leaveInput.value) leaveBy = leaveInput.value;
+      sheetBg.classList.remove("open");
+      render();
+    });
+    $("resetLeave").addEventListener("click", function () {
+      leaveBy = FRIDAY.leaveBy;
+      leaveInput.value = leaveBy;
+      render();
+    });
+    $("jumpFive").addEventListener("click", function () { jumpToRemaining(5 * 60 * 1000); });
+    $("jumpZero").addEventListener("click", function () { jumpToRemaining(0); });
+    $("toggleLive").addEventListener("click", function () {
+      live = !live;
+      demoOffsetMs = 0;
+      if (!live) startDemo(true);
+      $("toggleLive").textContent = live ? "Back to Friday demo" : "Use real clock";
+      modeHint.textContent = live
+        ? "Using this tablet’s clock. If it is not Friday morning you may see the waiting state or a different remaining time."
+        : "Demo pretends it is Friday morning.";
+      sheetBg.classList.remove("open");
+      render();
+    });
+
+    window._demoEpochSim = todayAt(FRIDAY.alarm, new Date()).getTime();
+    window._demoEpochWall = Date.now();
+    setInterval(render, 250);
+  </script>
+</body>
+</html>

@@ -1,0 +1,70 @@
+{
+  "timezone": "America/Los_Angeles",
+  "clockMode": "shared",
+  "notes": [
+    "ONE shared household clock. Not a clock per kid. One alarm and one leaveBy per weekday.",
+    "Weekday household times. Not school bells.",
+    "Friday alarm 06:35 / leaveBy 07:45 is confirmed (example date 2026-08-21).",
+    "Monday–Thursday times are PLACEHOLDERS: earlier than Friday because Friday is the late start. David: replace them.",
+    "Saturday and Sunday are off. No weekend leave-by invented.",
+    "Leave-by already includes the buffer to get to school. Do not add bell times here unless we need them later."
+  ],
+  "days": {
+    "monday": {
+      "enabled": true,
+      "label": "School day",
+      "alarm": "06:15",
+      "leaveBy": "07:15",
+      "status": "placeholder",
+      "comment": "Guess only. Earlier than Friday. Fill in real alarm and leave-by."
+    },
+    "tuesday": {
+      "enabled": true,
+      "label": "School day",
+      "alarm": "06:15",
+      "leaveBy": "07:15",
+      "status": "placeholder",
+      "comment": "Guess only. Earlier than Friday. Fill in real alarm and leave-by."
+    },
+    "wednesday": {
+      "enabled": true,
+      "label": "School day",
+      "alarm": "06:15",
+      "leaveBy": "07:15",
+      "status": "placeholder",
+      "comment": "Guess only. Earlier than Friday. Fill in real alarm and leave-by. Note here if Wednesday is actually different."
+    },
+    "thursday": {
+      "enabled": true,
+      "label": "School day",
+      "alarm": "06:15",
+      "leaveBy": "07:15",
+      "status": "placeholder",
+      "comment": "Guess only. Earlier than Friday. Fill in real alarm and leave-by."
+    },
+    "friday": {
+      "enabled": true,
+      "label": "Late start Friday",
+      "alarm": "06:35",
+      "leaveBy": "07:45",
+      "status": "confirmed",
+      "comment": "Confirmed household example from Friday 2026-08-21. Leave the house by 7:45 AM at the latest."
+    },
+    "saturday": {
+      "enabled": false,
+      "label": "No school",
+      "alarm": null,
+      "leaveBy": null,
+      "status": "off",
+      "comment": "No weekend schedule invented."
+    },
+    "sunday": {
+      "enabled": false,
+      "label": "No school",
+      "alarm": null,
+      "leaveBy": null,
+      "status": "off",
+      "comment": "No weekend schedule invented."
+    }
+  }
+}
