@@ -71,7 +71,7 @@ What can wait (does not block this plan):
 
 - Real Mon–Thu `alarm` and `leaveBy` when David has them. Keep the placeholder numbers until then.
 - Any weekly exception beyond “Friday is later” (minimum days, early Wednesday, etc.).
-- Whether a no-school weekday should stay dark, say “no school”, or just not open the tab.
+- Weekend / no-school copy, once David picks an idle option.
 
 Edit the JSON; do not hide times in the HTML.
 
@@ -81,7 +81,7 @@ Edit the JSON; do not hide times in the HTML.
 
 The leftover tab. Near-black background. One number they can read from the bed. Designed to fill the viewport; **fullscreen-on-tap / F11 is optional, not required.**
 
-- **Before alarm:** dim waiting state. Show today’s leave-by and “countdown starts at 6:35”. Do not burn a 70-minute countdown while they are still supposed to be asleep.
+- **When the leave-by countdown is not running** (before the alarm, weekend, no-school day): the leftover tab should still be useful — not blank or dark. Options below; not a chosen UI yet.
 - **Alarm → leave-by:** giant remaining time. Format as **total minutes:seconds** (`70:00`, then `69:59`). Kids think in minutes. `1:10:00` is weaker.
 - **At 0:** the number is no longer the point. Big **LEAVE NOW** (or equivalent). High contrast, hard to ignore.
 - **After 0:** stay on the leave state and show overtime (`+2:15 late`). Do not reset, do not play a cheerful “done.” They are late.
@@ -101,6 +101,20 @@ The number should feel more dangerous as the window closes. Suggested bands (tun
 | Zero / late | Flashing red + black, “LEAVE NOW” |
 
 No kid photos. No points, streaks, or “who got ready first.”
+
+### Idle / off-countdown (open — David picks)
+
+When the shared leave-by countdown is **not** running, the Surface tab should still be useful. Not a black screen. Not a finished idle UI in this plan — only options to choose from on review.
+
+Applies to: before today’s alarm, weekends, and other `enabled: false` days. Does **not** replace the running countdown, the zero **LEAVE NOW** state, or overtime.
+
+| Option | What they’d see | Notes |
+| --- | --- | --- |
+| **A) Regular clock** | Current time, large | Same “one big number” habit as the countdown. No status copy. |
+| **B) A status word** | e.g. weekend / no school / waiting | Tells them why it isn’t counting. No clock. Exact words not locked. |
+| **C) Both** | Large current time + a small status word | Clock to glance at; word for why it’s idle. |
+
+Open for David to pick when he reviews this PR. Do not pick here. Do not spec type, color, or layout until he chooses.
 
 ### What an adult does (touch)
 
@@ -139,10 +153,9 @@ Already decided (not listed below): **one shared clock**; **normal leftover brow
 Still unknown — placeholders are fine; do not block the plan:
 
 1. **Mon–Thu leave-by and alarm** — the only confirmed pair is Friday 6:35 → 7:45. Keep `06:15` / `07:15` labeled as placeholders. Do not invent new times.
-2. **No-school weekday** — dark, “no school”, or just don’t open the tab.
-3. **Sound at zero?** — default no.
-4. **Where the tablet lives** — dresser vs hallway vs by the door (how huge the type needs to be).
-5. **Who edits the JSON?** — David only is fine for v1.
+2. **Sound at zero?** — default no.
+3. **Where the tablet lives** — dresser vs hallway vs by the door (how huge the type needs to be).
+4. **Who edits the JSON?** — David only is fine for v1.
 
 Stay-awake, auto-start, and Windows version are later setup. Not open product questions.
 
