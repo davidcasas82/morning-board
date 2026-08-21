@@ -12,32 +12,34 @@ When the alarm goes off, a countdown starts toward that day’s **leave-by** tim
 
 ## Product north star
 
-A full-screen kiosk on an old Surface Pro (Windows, touch), sitting on a dresser or mounted wall-ish.
+A leftover browser tab on an old Surface Pro (Windows, touch), sitting on a dresser or mounted wall-ish.
 
 - Giant high-contrast remaining-time numbers
 - Instant read: “we are running out of time”
-- Cheap, offline, no accounts, no tracking, no kid photos
+- Cheap static page, no accounts, no tracking, no kid photos, no cloud API
 - v1 is the clock. A thin dashboard around it is later, not now.
 
 **Locked for v1: one shared household clock.** Not a clock per kid. The number on the tablet is the family’s remaining time to leave, even though the kids go to different schools.
 
+**Locked for v1: normal browser tab.** Open `kiosk.html` (or the page) in Edge or Chrome and leave that tab open. Not a locked kiosk: no Assigned Access, no `--kiosk` flag, no “this tablet is only this page.”
+
 ## v1 vs later
 
-| Now (v1) | Later (v2+), only if v1 is used |
+| Now (v1) | Later (setup or v2+), only if v1 is used |
 | --- | --- |
 | One shared countdown for the house | Optional thin chrome: weekday, a couple of getting-ready steps |
 | Weekday schedule in a data file | Exception dates (minimum day, no school, late start not on Friday) |
 | Adult override for *today’s* leave-by | Sound at alarm or at zero (easy to hate; keep optional) |
-| Full-screen, urgency colors, zero / late state | Auto-launch / assigned-access polish once the tablet details are known |
-| Open as a file or a tiny local server | — |
+| Big remaining time, urgency colors, zero / late state | Stay-awake and auto-start-on-login (tablet setup, not product) |
+| Open the page in Edge/Chrome and leave the tab open | — |
 
-Out of scope: per-kid countdowns, backends, logins, Gmail, Google Calendar, school-portal scrapers, paid APIs, weather, location, photos.
+Out of scope: locked kiosk mode, per-kid countdowns, backends, logins, Gmail, Google Calendar, school-portal scrapers, paid APIs, weather, location, photos.
 
 ## How a day is defined
 
 A school morning is three facts plus a label:
 
-1. **`alarm`** — when the countdown *starts* (the wake-up). Before this, the kiosk is idle / waiting, not counting down to leave-by.
+1. **`alarm`** — when the countdown *starts* (the wake-up). Before this, the page is idle / waiting, not counting down to leave-by.
 2. **`leaveBy`** — when they must be out the door. This is a house time, not a school bell.
 3. **`enabled`** — school morning or not. Weekends start as off.
 4. **`label`** — short human note (“Late start Friday”), for adults and for a future chrome line. Not required for the giant numbers.
@@ -62,14 +64,14 @@ Source of truth: [`schedule.json`](schedule.json).
 
 - Weekday keys, not calendar dates.
 - Friday `06:35` / `07:45` is **confirmed** from the 2026-08-21 example.
-- Mon–Thu are **placeholders** (earlier than Friday, because Friday is the late start). They are not school bells and they are not measured leave-by times.
+- Mon–Thu stay **labeled placeholders** (`06:15` / `07:15`, earlier than Friday only because Friday is the late start). They are not school bells and they are not measured leave-by times. **Do not invent replacements.**
 - Sat–Sun are off. No weekend leave-by invented.
 
-What David still needs to fill in (does not block this plan):
+What can wait (does not block this plan):
 
-- Real Mon–Thu `alarm` and `leaveBy` (and whether those four days are actually the same). Placeholders stay until then.
+- Real Mon–Thu `alarm` and `leaveBy` when David has them. Keep the placeholder numbers until then.
 - Any weekly exception beyond “Friday is later” (minimum days, early Wednesday, etc.).
-- Whether the kiosk should stay dark on weekends or show a simple “no school” screen.
+- Whether a no-school weekday should stay dark, say “no school”, or just not open the tab.
 
 Edit the JSON; do not hide times in the HTML.
 
@@ -77,11 +79,11 @@ Edit the JSON; do not hide times in the HTML.
 
 ### What the kids see
 
-Full screen. Near-black background. One number they can read from the bed.
+The leftover tab. Near-black background. One number they can read from the bed. Designed to fill the viewport; **fullscreen-on-tap / F11 is optional, not required.**
 
 - **Before alarm:** dim waiting state. Show today’s leave-by and “countdown starts at 6:35”. Do not burn a 70-minute countdown while they are still supposed to be asleep.
 - **Alarm → leave-by:** giant remaining time. Format as **total minutes:seconds** (`70:00`, then `69:59`). Kids think in minutes. `1:10:00` is weaker.
-- **At 0:** the number is no longer the point. Full-screen **LEAVE NOW** (or equivalent). High contrast, hard to ignore.
+- **At 0:** the number is no longer the point. Big **LEAVE NOW** (or equivalent). High contrast, hard to ignore.
 - **After 0:** stay on the leave state and show overtime (`+2:15 late`). Do not reset, do not play a cheerful “done.” They are late.
 
 A small secondary line is allowed if it does not steal the number: `Fri · leave by 7:45`. Getting-ready steps and extra chrome wait for v2.
@@ -104,57 +106,54 @@ No kid photos. No points, streaks, or “who got ready first.”
 
 Kids should not have to aim. Adults need fat targets, no hover-only UI.
 
-- **Tap-to-start / tap for fullscreen** — browsers will not fullscreen themselves. First tap enters fullscreen and starts the demo or the day.
+- **Open the page and leave it** — that is the v1 launch path. Fullscreen tap / F11 is a nice extra, not the product.
 - **Quiet adult affordance** — a corner control (gear). Large hit area, low visual weight so it does not look like a game button.
 - **Today override** — set *today’s* leave-by without editing the weekday file (dentist, traffic, “we’re already late, leave by 7:20”). Reset returns to the weekday default.
 - **Mock-only jumps** — “5 minutes left” and “hit zero” so David can preview urgency on the Surface at 2pm.
 
 Today’s override is session-only in the mock. v1 can keep it in `localStorage` so a refresh does not lose it; still not an account.
 
-## Surface Pro notes (still unknown — do not block)
+## Surface Pro: product vs later setup
 
-We do **not** yet know the tablet’s Windows version, whether it must run fully offline, or which stay-awake / kiosk path will stick. Those are setup details for when David has the Surface in hand. They do not change the product: a static page with one giant clock.
+**v1 launch path (locked):** copy or clone the files, open `kiosk.html` (or the page) in Edge or Chrome, leave the tab open. Wi‑Fi on the Surface is fine. Offline is **not** a v1 requirement. Still no cloud API — v1 stays a static local page that does not need Gmail, calendars, or a hosted backend.
 
-**Known enough to plan**
+**Not v1 (later setup, not product):**
 
-- Old Surface Pro, Windows, touch, likely on a dresser or wall-ish.
-- Cheap stack: plain HTML/CSS/JS. No React, bundler, or Node on the tablet.
-- The mock is one file (`kiosk.html`) so it can open from `file://`. Copy it onto the tablet and tap to fullscreen (`F11` if a keyboard is attached).
+- Stay-awake / “don’t dim”
+- Auto-start on login
+- Windows version specifics
+- Assigned Access, `--kiosk`, or any “this tablet is only this page” lock
 
-**Fill in later (placeholders, not requirements)**
-
-- **Windows version** — unknown. Edge and Chrome kiosk flags differ by version; try the browser that is already on the machine.
-- **Stay awake** — unknown whether Settings → Power & sleep (plugged in → Never) is enough, or whether it still dims. AC power either way.
-- **Kiosk / launch on login** — unknown. Candidates after v1 works: Startup-folder shortcut, Task Scheduler, Edge `--kiosk`, Chrome `--kiosk`, or Windows Assigned Access. Skip until the clock is trusted.
-- **Offline** — treat “works as a local file / local network, no cloud API” as the default. Confirm on the tablet whether it has reliable Wi‑Fi or should stay file-only.
+Do not turn those into v1 requirements. A leftover browser tab is enough.
 
 **Display (when we get there)**
 
-- Size the number in viewport units (`vmin`) so Windows scaling does not clip it.
+- Size the number in viewport units (`vmin`) so Windows scaling does not clip it, including with the browser chrome still showing.
 - High contrast beats brand color. Red is for *running out of time*, not for the whole morning.
 - Touch targets ≥ 48px. No hover menus.
 
 ## Open questions for David
 
-Decided: **one shared clock.** Not listed below.
+Already decided (not listed below): **one shared clock**; **normal leftover browser tab** (not a locked kiosk); **Wi‑Fi is fine** (offline is not a v1 requirement).
 
 Still unknown — placeholders are fine; do not block the plan:
 
-1. **Mon–Thu leave-by and alarm** — the only confirmed pair is Friday 6:35 → 7:45. What are the other school mornings? Are Mon–Thu the same as each other?
-2. **Surface Pro facts** — Windows version, stay-awake behavior, whether it must run with no Wi‑Fi, which browser is already installed.
-3. **No-school weekday** — dark, “no school”, or hide the tablet.
-4. **Sound at zero?** — default no.
-5. **Where the tablet lives** — dresser vs hallway vs by the door (how huge the type needs to be).
-6. **Who edits the JSON?** — David only is fine for v1.
+1. **Mon–Thu leave-by and alarm** — the only confirmed pair is Friday 6:35 → 7:45. Keep `06:15` / `07:15` labeled as placeholders. Do not invent new times.
+2. **No-school weekday** — dark, “no school”, or just don’t open the tab.
+3. **Sound at zero?** — default no.
+4. **Where the tablet lives** — dresser vs hallway vs by the door (how huge the type needs to be).
+5. **Who edits the JSON?** — David only is fine for v1.
+
+Stay-awake, auto-start, and Windows version are later setup. Not open product questions.
 
 ## Recommended build path (after you review)
 
-1. Correct `schedule.json` Mon–Thu when you know the times. Leave placeholders until then.
-2. Use `kiosk.html` as the v1 shell: one shared clock, static page, no framework.
+1. Leave Mon–Thu in `schedule.json` as labeled placeholders until real times exist. Do not invent replacements.
+2. Use `kiosk.html` as the v1 shell: one shared clock, static page, no framework. Open it in a normal tab.
 3. Drive the clock from the JSON + the real local clock. Keep the Friday demo mode as a preview switch.
 4. Persist today’s leave-by override in `localStorage`.
 5. Confirm waiting-before-alarm and late states on a real morning.
-6. Only then: stay-awake / kiosk / launch-on-login, using whatever Windows version is on the tablet. Dashboard strip after the clock is in use.
+6. Only later, if needed: stay-awake and launch-on-login. Dashboard strip after the clock is in use. Still no locked kiosk unless someone asks.
 
 Do not add a build step, a framework, calendar OAuth, or per-kid UI.
 
@@ -162,10 +161,13 @@ Do not add a build step, a framework, calendar OAuth, or per-kid UI.
 
 - Irvine / Pacific time (`America/Los_Angeles`).
 - **One shared household clock** is a locked v1 decision. Not per kid.
+- **v1 launch** is a leftover Edge/Chrome tab. Not Assigned Access, not `--kiosk`.
+- Fullscreen-on-tap / F11 is optional.
+- Wi‑Fi is available. Offline is not a v1 requirement. Still no cloud API; the page is static/local.
 - Friday 6:35 / 7:45 is a real household example, not a school-bell time.
-- Mon–Thu placeholders are **earlier than Friday** (`06:15` / `07:15`) only because Friday is the late start. They are guesses for the file to be complete. **Replace them.**
+- Mon–Thu placeholders stay **`06:15` / `07:15`**, labeled as guesses. **Do not invent new times.**
 - Weekends are off. No Saturday sports leave-by invented.
 - On-screen copy does not use kid names or school names. Those stay in this plan and in JSON comments.
 - School start bells for Legacy Magnet Academy and Ladera Elementary were **not** looked up and are **not** stored. Leave-by is the only time that matters for v1.
-- Surface Windows version, stay-awake, kiosk mode, and offline-or-not are **unknown**. The mock assumes a local HTML file is enough until proven otherwise.
+- Stay-awake and auto-start-on-login are later setup, not v1.
 - The mock defaults to a **Friday demo** (pretend it is 6:35) so opening it at 2pm still shows a countdown. A “use the real clock” switch is there for an actual morning.
