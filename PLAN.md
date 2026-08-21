@@ -2,6 +2,25 @@
 
 Planning pass only. No app, accounts, or live calendars. David can correct times and pick this up locally.
 
+## Decisions so far
+
+**Locked**
+
+- One shared household countdown. Not a clock per kid. No school names or kid names on screen.
+- v1 launch: open the page in Edge/Chrome and leave the tab open. Not Assigned Access, not `--kiosk`.
+- Fullscreen-on-tap / F11 is optional.
+- Wi‑Fi is fine. Offline is not a v1 requirement. Still no cloud API; static local page.
+- Friday alarm **6:35** / leave-by **7:45** (example 2026-08-21). House times, not school bells.
+- Mon–Thu stay labeled placeholders **6:15 / 7:15**. Do not invent replacements.
+- Stay-awake and auto-start-on-login are later tablet setup, not v1 product.
+- When the countdown is not running, the leftover tab should still be useful — not blank or dark.
+
+**Open (pick on review; not blocking)**
+
+- Idle / off-countdown: **A** large regular clock, **B** a status word, **C** both. See below. Not chosen.
+- How long **LEAVE NOW / late** stays up on a leftover tab before idle returns. See below. Not chosen.
+- Real Mon–Thu alarm and leave-by, when known.
+
 ## Problem
 
 After the alarm, the kids sit on their beds and lose track of time. The thing they need is not a dashboard. They need a visual they cannot ignore: **how much time is left before they have to leave the house**.
@@ -31,6 +50,7 @@ A leftover browser tab on an old Surface Pro (Windows, touch), sitting on a dres
 | Weekday schedule in a data file | Exception dates (minimum day, no school, late start not on Friday) |
 | Adult override for *today’s* leave-by | Sound at alarm or at zero (easy to hate; keep optional) |
 | Big remaining time, urgency colors, zero / late state | Stay-awake and auto-start-on-login (tablet setup, not product) |
+| Leftover tab is useful when not counting (idle look not chosen) | Thin dashboard strip after the clock is in use |
 | Open the page in Edge/Chrome and leave the tab open | — |
 
 Out of scope: locked kiosk mode, per-kid countdowns, backends, logins, Gmail, Google Calendar, school-portal scrapers, paid APIs, weather, location, photos.
@@ -102,11 +122,28 @@ The number should feel more dangerous as the window closes. Suggested bands (tun
 
 No kid photos. No points, streaks, or “who got ready first.”
 
+### A leftover tab over a whole day
+
+The tablet is not a morning-only kiosk. Someone opens the tab and leaves it. v1 has to make sense at 6:10, 7:40, 8:30, and Saturday afternoon without a locked kiosk reset.
+
+Product states (not a visual spec):
+
+| State | When | What it is |
+| --- | --- | --- |
+| **Idle** | Before today’s `alarm`; weekend; `enabled: false` | Useful screen. Not blank. Idle options below — not chosen. |
+| **Countdown** | From `alarm` until `leaveBy` | The v1 product: one shared remaining-time number. |
+| **Leave / late** | At 0 and after | **LEAVE NOW** plus overtime. Still not idle. |
+| **Back to idle** | After the morning is over, somehow | Needed because the tab stays open. Options below — not chosen. |
+
+A **today override** (leave-by or “no school today”) is for **this calendar date only**. Saturday does not inherit Friday’s 7:20. Monday uses Monday’s weekday default (still a placeholder until David fills it in).
+
+Do not add calendar exceptions, snow-day feeds, or a settings app in v1. If today is weird, the adult changes today’s leave-by (or closes the tab).
+
 ### Idle / off-countdown (open — David picks)
 
 When the shared leave-by countdown is **not** running, the Surface tab should still be useful. Not a black screen. Not a finished idle UI in this plan — only options to choose from on review.
 
-Applies to: before today’s alarm, weekends, and other `enabled: false` days. Does **not** replace the running countdown, the zero **LEAVE NOW** state, or overtime.
+Applies to: before today’s alarm, weekends, other `enabled: false` days, and whenever the morning has returned to idle. Does **not** replace the running countdown, the zero **LEAVE NOW** state, or overtime.
 
 | Option | What they’d see | Notes |
 | --- | --- | --- |
@@ -115,6 +152,19 @@ Applies to: before today’s alarm, weekends, and other `enabled: false` days. D
 | **C) Both** | Large current time + a small status word | Clock to glance at; word for why it’s idle. |
 
 Open for David to pick when he reviews this PR. Do not pick here. Do not spec type, color, or layout until he chooses.
+
+### After leave / late — back to idle (open — David picks)
+
+If the tab stays open, “+3:40 late” at lunch is the wrong object. The morning has to end. Not a finished UI. Options only:
+
+| Option | What happens | Notes |
+| --- | --- | --- |
+| **1) Next alarm** | Stay on leave/late until the next school-day `alarm` | Simple. Saturday/Sunday would sit on Friday’s late state unless weekends force idle. |
+| **2) Midnight** | Return to idle at local midnight | Simple. Friday late becomes Saturday idle overnight. |
+| **3) Adult dismiss** | Leave/late stays until someone taps “done” / close | Extra touch target. Tab can stay “NOW” all day if nobody taps. |
+| **4) Short window, then idle** | Auto-idle some time after `leaveBy` | Needs a duration later. Do not invent one here. |
+
+Open for David to pick. Do not pick here. Weekends should not keep Friday’s late number up — even if (1) is chosen, `enabled: false` days should be idle.
 
 ### What an adult does (touch)
 
@@ -159,14 +209,17 @@ Still unknown — placeholders are fine; do not block the plan:
 
 Stay-awake, auto-start, and Windows version are later setup. Not open product questions.
 
+Idle look (A/B/C) and how leave/late returns to idle (1–4) live in the UX sections above. Pick those on this PR; they are not extra numbered items here.
+
 ## Recommended build path (after you review)
 
 1. Leave Mon–Thu in `schedule.json` as labeled placeholders until real times exist. Do not invent replacements.
 2. Use `kiosk.html` as the v1 shell: one shared clock, static page, no framework. Open it in a normal tab.
 3. Drive the clock from the JSON + the real local clock. Keep the Friday demo mode as a preview switch.
-4. Persist today’s leave-by override in `localStorage`.
-5. Confirm waiting-before-alarm and late states on a real morning.
-6. Only later, if needed: stay-awake and launch-on-login. Dashboard strip after the clock is in use. Still no locked kiosk unless someone asks.
+4. Implement the four product states (idle → countdown → leave/late → idle) after David picks idle look and the late handoff.
+5. Persist today’s leave-by override in `localStorage` (this date only).
+6. Confirm a real school morning, then a leftover Saturday, so the tab does not sit on Friday late.
+7. Only later, if needed: stay-awake and launch-on-login. Dashboard strip after the clock is in use. Still no locked kiosk unless someone asks.
 
 Do not add a build step, a framework, calendar OAuth, or per-kid UI.
 
@@ -183,4 +236,5 @@ Do not add a build step, a framework, calendar OAuth, or per-kid UI.
 - On-screen copy does not use kid names or school names. Those stay in this plan and in JSON comments.
 - School start bells for Legacy Magnet Academy and Ladera Elementary were **not** looked up and are **not** stored. Leave-by is the only time that matters for v1.
 - Stay-awake and auto-start-on-login are later setup, not v1.
+- A leftover tab is a **24/7 surface**. Idle and “end of morning” are in v1 thinking; their exact look/handoff are not locked.
 - The mock defaults to a **Friday demo** (pretend it is 6:35) so opening it at 2pm still shows a countdown. A “use the real clock” switch is there for an actual morning.
