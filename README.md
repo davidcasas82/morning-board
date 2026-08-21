@@ -1,13 +1,9 @@
 # morning-board
 
-Kids morning leave-by countdown for an old Surface Pro.
+Household morning countdown for an old Surface Pro. One shared clock — not a clock per kid.
 
-**v1 is one shared clock** — the household time left before everyone leaves. Not a clock per kid. A dashboard can come later.
+**Launch:** open [https://davidcasas82.github.io/morning-board/](https://davidcasas82.github.io/morning-board/) in Edge or Chrome and leave that tab open. Wi‑Fi is required for the URL, weather, and weekday-time updates. Fullscreen / F11 is optional. Not Assigned Access, not `--kiosk`.
 
-**v1 launch:** open [kiosk.html](kiosk.html) in Edge or Chrome and leave the tab open. Not a locked kiosk (no Assigned Access, no `--kiosk`). Fullscreen-on-tap / F11 is optional. Wi‑Fi is fine; offline is not required. Still no cloud API.
+Weekday **alarm** and **on-the-road** times live in [schedule.json](schedule.json). Change the file and push (or ask Grok to). The open tab polls it about once a minute. Downstairs is 15 minutes before on-the-road. Friday 6:35 / 7:45 is confirmed; Mon–Thu `6:15` / `7:15` are still placeholders until you replace them.
 
-This pass is planning only. See [PLAN.md](PLAN.md). Weekday times live in [schedule.json](schedule.json). Friday 6:35 → 7:45 is confirmed; Mon–Thu stay labeled placeholders (`6:15` / `7:15`). Do not invent replacements.
-
-When the countdown is not running, the leftover tab should still be useful (clock, a status word, or both — not chosen). The plan also covers the whole-day cycle of a tab that stays open: idle → countdown → leave/late → back to idle (handoff not chosen). No idle UI is locked yet.
-
-The HTML file is a static mock so you can feel the idea, not the full app.
+The gear on the page is today-only override and countdown preview. It does not write the week.

@@ -1,444 +1,1438 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="color-scheme" content="dark">
-  <title>Leave-by countdown</title>
-  <style>
-    :root {
-      --bg: #070708;
-      --ink: #f4f4f2;
-      --muted: #9a9a96;
-      --panel: #161618;
-      --line: #2a2a2e;
-      --btn: #2c2c31;
-    }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Morning board</title>
+<link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-    * { box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: radial-gradient(ellipse at center, #1a1a0f 0%, #0d0d00 55%, #0a0a00 100%);
+    font-family: 'VT323', monospace;
+    color: #33ff66;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+  }
 
-    html, body {
-      margin: 0;
-      height: 100%;
-      background: var(--bg);
-      color: var(--ink);
-      font-family: "Segoe UI", system-ui, sans-serif;
-      overflow: hidden;
-      user-select: none;
-      -webkit-user-select: none;
-      touch-action: manipulation;
-    }
+  /* Scanline overlay */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(
+      to bottom,
+      transparent 0px,
+      transparent 2px,
+      rgba(0,0,0,0.35) 2px,
+      rgba(0,0,0,0.35) 4px
+    );
+    pointer-events: none;
+    z-index: 100;
+    animation: scanroll 20s linear infinite;
+  }
 
-    body {
-      min-height: 100dvh;
-    }
+  @keyframes scanroll {
+    0% { background-position: 0 0; }
+    100% { background-position: 0 80px; }
+  }
 
-    button {
-      font: inherit;
-      color: inherit;
-      background: var(--btn);
-      border: 0;
-      border-radius: 14px;
-      min-height: 52px;
-      padding: 0.7rem 1.1rem;
-    }
+  /* Vignette + corner darkening */
+  body::after {
+    content: '';
+    position: fixed; inset: 0;
+    background:
+      radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,0.45) 100%),
+      radial-gradient(ellipse 60% 60% at 0% 0%, rgba(0,0,0,0.3) 0%, transparent 60%),
+      radial-gradient(ellipse 60% 60% at 100% 0%, rgba(0,0,0,0.3) 0%, transparent 60%),
+      radial-gradient(ellipse 60% 60% at 0% 100%, rgba(0,0,0,0.3) 0%, transparent 60%),
+      radial-gradient(ellipse 60% 60% at 100% 100%, rgba(0,0,0,0.3) 0%, transparent 60%);
+    pointer-events: none;
+    z-index: 99;
+  }
 
-    button:active { transform: scale(0.98); }
+  /* Barrel-wrap: curved CRT glass illusion */
+  #barrel-wrap {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    border-radius: 40px / 30px;
+    box-shadow:
+      inset 0 0 120px rgba(0,0,0,0.9),
+      inset 0 0 40px  rgba(0,0,0,0.5);
+  }
 
-    .screen {
-      height: 100dvh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 4vh 4vw;
-      text-align: center;
-    }
+  #app {
+    display: flex;
+    width: 100vw; height: 100vh;
+    position: relative;
+    z-index: 1;
+  }
 
-    .eyebrow {
-      font-size: clamp(14px, 3.2vmin, 28px);
-      letter-spacing: 0.28em;
-      text-transform: uppercase;
-      color: var(--muted);
-      font-weight: 700;
-    }
+  /* LEFT — Clock */
+  #left {
+    flex: 0 0 70%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 0 40px;
+    gap: 28px;
+    overflow: visible;
+  }
 
-    .time {
-      font-size: clamp(64px, 28vmin, 280px);
-      font-weight: 800;
-      line-height: 0.86;
-      letter-spacing: -0.045em;
-      font-variant-numeric: tabular-nums;
-      margin: 3vh 0 2vh;
-    }
+  /* Vertical divider */
+  #divider {
+    width: 1px;
+    background: rgba(51,255,102,0.2);
+    align-self: stretch;
+    margin: 20px 0;
+    box-shadow: 0 0 6px rgba(51,255,102,0.15);
+  }
 
-    .sub {
-      font-size: clamp(16px, 3.6vmin, 32px);
-      color: var(--muted);
-      font-weight: 600;
-    }
+  /* RIGHT — two equal halves */
+  #right {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    padding: 0;
+    min-width: 0;
+  }
 
-    .now-word {
-      font-size: clamp(72px, 22vmin, 220px);
-      font-weight: 800;
-      letter-spacing: 0.04em;
-      line-height: 0.9;
-    }
+  #panel-weather {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: space-between;
+    padding: 22px 20px 18px;
+  }
 
-    body[data-band="plenty"] { --ink: #f4f4f2; }
-    body[data-band="amber"] { --ink: #ffb020; --muted: #c4923a; }
-    body[data-band="orange"] { --ink: #ff6a2a; --muted: #c45a2a; }
-    body[data-band="red"] { --ink: #ff2a2a; --muted: #c84444; }
-    body[data-band="late"] { --ink: #fff; --bg: #b00000; }
+  #panel-divider {
+    height: 1px;
+    background: rgba(51,255,102,0.2);
+    margin: 0 20px;
+    box-shadow: 0 0 6px rgba(51,255,102,0.1);
+  }
 
-    body[data-band="red"] .time {
-      animation: pulse 1s ease-in-out infinite;
-    }
+  #panel-calendar {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: center;
+    padding: 18px 20px 22px;
+  }
 
-    body[data-band="late"] {
-      animation: flash 0.7s steps(2) infinite;
-    }
+  /* ─── 7-SEGMENT CLOCK ─── */
+  #clock-display {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    position: relative;
+    padding: 24px 28px;
+  }
 
-    @keyframes pulse {
-      0%, 100% { transform: scale(1); opacity: 1; }
-      50% { transform: scale(1.03); opacity: 0.88; }
-    }
+  .digit-group {
+    display: flex;
+    gap: 6px;
+  }
 
-    @keyframes flash {
-      0%, 49% { background: #c40000; }
-      50%, 100% { background: #1a0000; }
-    }
+  .colon-sep {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    gap: 28px;
+    padding: 0 20px;
+    margin-bottom: 28px;
+  }
 
-    .gear {
-      position: fixed;
-      top: 0;
-      right: 0;
-      width: 72px;
-      height: 72px;
-      border-radius: 0 0 0 22px;
-      background: transparent;
-      color: #5a5a5e;
-      font-size: 28px;
-      min-height: 0;
-      z-index: 3;
-    }
+  .colon-dot {
+    width: 20px; height: 20px;
+    border-radius: 50%;
+    background: #ccaa52;
+    box-shadow: 0 0 6px #cc8829, 0 0 14px #cc660044;
+    animation: blink 4s ease-in-out infinite;
+  }
 
-    .overlay, .sheet-bg {
-      position: fixed;
-      inset: 0;
-      z-index: 4;
-    }
+  @keyframes blink {
+    0%   { opacity: 1; }
+    50%  { opacity: 0.25; }
+    100% { opacity: 1; }
+  }
 
-    .overlay {
-      background: #070708;
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-      align-items: center;
-      gap: 2rem;
-      padding: 2rem;
-    }
+  /* SVG digit sizing — overflow visible lets glow bleed outside viewBox */
+  .digit-svg { display: block; overflow: visible; }
+  .digit-lg .digit-svg { width: 11vw; height: 18vw; max-width: 178px; max-height: 288px; }
+  .digit-sm .digit-svg { width: 7.5vw; height: 12.5vw; max-width: 124px; max-height: 204px; }
+  .colon-sep.sm { gap: 20px; padding: 0 14px; }
+  .colon-sep.sm .colon-dot { width: 14px; height: 14px; }
+  .colon-sep.sm { margin-bottom: 16px; }
 
-    .overlay h1 {
-      margin: 0;
-      font-size: clamp(32px, 8vmin, 72px);
-      letter-spacing: -0.03em;
-    }
+  /* Digit container also needs overflow visible so the SVG glow isn't cropped by the div */
+  .digit-lg, .digit-sm { overflow: visible; }
 
-    .overlay p {
-      margin: 0;
-      max-width: 22em;
-      font-size: clamp(16px, 3.4vmin, 24px);
-      color: #b8b8b4;
-      line-height: 1.4;
-    }
+  /* Lit segments emit amber glow — reduced 20% brightness */
+  .seg-on  { fill: #ccaa52; filter: drop-shadow(0 0 3px #ccaa52) drop-shadow(0 0 9px #cc8829) drop-shadow(0 0 20px #cc660066); }
+  /* Unlit: dark recessed channel, no glow */
+  .seg-off { fill: #0e0e05; filter: url(#recess); }
 
-    .go {
-      min-width: min(90vw, 420px);
-      min-height: 72px;
-      font-size: 1.25rem;
-      font-weight: 700;
-      background: #e8e8e4;
-      color: #111;
-    }
+  /* overflow visible still needed so per-polygon glow bleeds outside viewBox */
+  .digit-svg { overflow: visible; }
 
-    .sheet-bg {
-      background: rgba(0, 0, 0, 0.55);
-      display: none;
-      align-items: flex-end;
-    }
+  #ampm-indicator {
+    font-size: 1.6rem;
+    color: #ccaa52;
+    text-shadow: 0 0 8px #cc882966;
+    letter-spacing: 0.05em;
+    align-self: flex-end;
+    padding-bottom: 10px;
+    padding-left: 8px;
+  }
 
-    .sheet-bg.open { display: flex; }
+  /* ─── DATE LINE ─── */
+  #date-line {
+    font-size: 2.1rem;
+    letter-spacing: 0.15em;
+    color: #44dd66;
+    text-shadow: 0 0 8px rgba(51,255,102,0.4);
+    text-transform: uppercase;
+  }
 
-    .sheet {
-      width: 100%;
-      background: var(--panel);
-      border-top: 1px solid var(--line);
-      border-radius: 20px 20px 0 0;
-      padding: 1.25rem 1.25rem calc(1.25rem + env(safe-area-inset-bottom));
-      text-align: left;
-    }
+  #date-line .amber {
+    color: #ffcc66;
+    text-shadow: 0 0 8px #ffaa3388;
+  }
 
-    .sheet h2 {
-      margin: 0 0 0.75rem;
-      font-size: 1.15rem;
-    }
+  /* ─── WEATHER SECTION ─── */
+  #weather-body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    justify-content: center;
+    padding-top: 0;
+  }
 
-    .row {
-      display: flex;
-      gap: 0.6rem;
-      flex-wrap: wrap;
-      margin: 0.6rem 0;
-    }
+  #weather-icon {
+    width: 260px;
+    height: 260px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    filter: drop-shadow(0 0 5px #33ff66cc) drop-shadow(0 0 16px #33ff6655);
+    animation: iconpulse 4s ease-in-out infinite;
+  }
 
-    .row button { flex: 1 1 140px; }
+  #weather-icon svg {
+    width: 100%;
+    height: 100%;
+  }
 
-    label {
-      display: block;
-      font-size: 0.85rem;
-      color: var(--muted);
-      margin-bottom: 0.35rem;
-    }
+  @keyframes iconpulse {
+    0%,100% { filter: drop-shadow(0 0 4px #33ff66bb) drop-shadow(0 0 12px #33ff6633); }
+    50%      { filter: drop-shadow(0 0 8px #33ff66ff) drop-shadow(0 0 24px #33ff6666); }
+  }
 
-    input[type="time"] {
-      width: 100%;
-      min-height: 52px;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      background: #0f0f11;
-      color: var(--ink);
-      font-size: 1.2rem;
-      padding: 0 0.8rem;
-    }
+  #weather-temp {
+    font-size: 5.5rem;
+    color: #ffcc66;
+    text-shadow: 0 0 12px #ffaa3388, 0 0 28px #ff880033;
+    line-height: 1;
+    letter-spacing: -0.02em;
+  }
 
-    .hint {
-      color: var(--muted);
-      font-size: 0.9rem;
-      line-height: 1.35;
-      margin: 0.4rem 0 0.8rem;
-    }
+  #weather-desc {
+    font-size: 1.45rem;
+    color: #44dd66;
+    text-shadow: 0 0 8px rgba(51,255,102,0.35);
+    letter-spacing: 0.15em;
+    text-align: center;
+    text-transform: uppercase;
+    padding-bottom: 20px;
+  }
 
-    .hidden { display: none !important; }
-  </style>
+  #temp-arrow {
+    font-size: 3.5rem;
+    color: rgba(204,170,82,0.6);
+    vertical-align: middle;
+  }
+
+  #weather-city {
+    font-size: 1rem;
+    letter-spacing: 0.3em;
+    color: rgba(51,255,102,0.35);
+    text-transform: uppercase;
+    text-align: center;
+    margin-bottom: 10px;
+  }
+
+  /* ─── WEATHER DETAILS ─── */
+  #weather-bottom {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+    margin-top: auto;
+  }
+
+  #weather-details {
+    width: 100%;
+    display: flex;
+    justify-content: space-around;
+    border-top: 1px solid rgba(51,255,102,0.15);
+    padding-top: 14px;
+  }
+
+  .detail-block {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+  }
+
+  .detail-label {
+    font-size: 0.9rem;
+    letter-spacing: 0.2em;
+    color: rgba(51,255,102,0.5);
+    text-transform: uppercase;
+  }
+
+  .detail-value {
+    font-size: 1.6rem;
+    color: #ffcc66;
+    text-shadow: 0 0 8px #ffaa3366;
+    letter-spacing: 0.05em;
+  }
+
+  /* ─── CALENDAR ─── */
+  #cal-header {
+    font-size: 1.1rem;
+    letter-spacing: 0.25em;
+    color: rgba(51,255,102,0.55);
+    text-shadow: 0 0 6px rgba(51,255,102,0.3);
+    text-transform: uppercase;
+    margin-bottom: 10px;
+    align-self: flex-start;
+  }
+
+  #cal-grid {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 2px 0;
+    text-align: center;
+  }
+
+  .cal-dow {
+    font-size: 1rem;
+    color: rgba(51,255,102,0.35);
+    letter-spacing: 0.05em;
+    padding-bottom: 6px;
+  }
+
+  .cal-day {
+    font-size: 1.3rem;
+    color: rgba(51,255,102,0.6);
+    line-height: 1.9;
+    letter-spacing: 0.02em;
+  }
+
+  .cal-day.empty { opacity: 0; pointer-events: none; }
+
+  .cal-day.today {
+    color: #0a0a00;
+    background: #ccaa52;
+    box-shadow: 0 0 10px #cc882966;
+    border-radius: 3px;
+    position: relative;
+  }
+
+  /* ─── 5-DAY FORECAST ─── */
+  #forecast-row {
+    width: 100%;
+    display: flex;
+    justify-content: space-around;
+    border-top: 1px solid rgba(51,255,102,0.15);
+    padding-top: 12px;
+    margin-top: 12px;
+  }
+
+  .fc-day {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .fc-name {
+    font-size: 0.85rem;
+    letter-spacing: 0.15em;
+    color: rgba(51,255,102,0.45);
+    text-transform: uppercase;
+  }
+
+  .fc-icon {
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    filter: drop-shadow(0 0 3px #33ff6688);
+  }
+
+  .fc-icon svg { width: 100%; height: 100%; }
+
+  .fc-high {
+    font-size: 1.2rem;
+    color: #ccaa52;
+    text-shadow: 0 0 6px #cc882955;
+    letter-spacing: 0.05em;
+  }
+
+  /* Loading / error state */
+  .w-loading {
+    color: rgba(51,255,102,0.4);
+    font-size: 2rem;
+    letter-spacing: 0.1em;
+    animation: fadepulse 1.5s ease-in-out infinite;
+    font-family: 'VT323', monospace;
+  }
+
+  @keyframes fadepulse { 0%,100%{opacity:0.4} 50%{opacity:1} }
+
+  #status-line {
+    font-size: 2.1rem;
+    letter-spacing: 0.15em;
+    color: #44dd66;
+    text-shadow: 0 0 8px rgba(51,255,102,0.4);
+    text-transform: uppercase;
+    min-height: 1.2em;
+  }
+
+  #status-line .amber {
+    color: #ffcc66;
+    text-shadow: 0 0 8px #ffaa3388;
+  }
+
+  #leave-now {
+    display: none;
+    position: absolute;
+    inset: 0;
+    align-items: center;
+    justify-content: center;
+    font-size: clamp(36px, 9vw, 120px);
+    font-weight: 400;
+    letter-spacing: 0.08em;
+    color: #fff;
+    text-shadow: 0 0 18px #ff2a2a, 0 0 40px #ff000088;
+    z-index: 2;
+    pointer-events: none;
+  }
+
+  body[data-mode="countdown"] #right,
+  body[data-mode="late"] #right,
+  body[data-mode="countdown"] #divider,
+  body[data-mode="late"] #divider {
+    display: none !important;
+  }
+
+  body[data-mode="countdown"] #left,
+  body[data-mode="late"] #left {
+    flex: 1 1 100%;
+    width: 100%;
+    max-width: none;
+    padding: 0 3vw;
+  }
+
+  body[data-mode="countdown"] .digit-lg .digit-svg,
+  body[data-mode="late"] .digit-lg .digit-svg {
+    width: 18vw;
+    height: 30vw;
+    max-width: 280px;
+    max-height: 460px;
+  }
+
+  body[data-mode="countdown"] .colon-sep,
+  body[data-mode="late"] .colon-sep {
+    gap: 42px;
+    padding: 0 32px;
+  }
+
+  body[data-mode="countdown"] .colon-dot,
+  body[data-mode="late"] .colon-dot {
+    width: 28px;
+    height: 28px;
+  }
+
+  body[data-mode="countdown"] #ampm-indicator,
+  body[data-mode="late"] #ampm-indicator {
+    font-size: 2.4rem;
+    padding-bottom: 16px;
+  }
+
+  body[data-mode="countdown"] #status-line,
+  body[data-mode="late"] #status-line {
+    font-size: clamp(28px, 4.5vw, 52px);
+  }
+
+  body[data-mode="late"] #leave-now { display: flex; }
+  body[data-mode="late"] #clock-display .digit-group,
+  body[data-mode="late"] #clock-display .colon-sep,
+  body[data-mode="late"] #ampm-indicator { opacity: 0.12; }
+
+  body[data-band="amber"] .seg-on { fill: #e0b040; filter: drop-shadow(0 0 3px #e0b040) drop-shadow(0 0 10px #cc8829); }
+  body[data-band="amber"] .colon-dot { background: #e0b040; }
+  body[data-band="orange"] .seg-on { fill: #ff7a2a; filter: drop-shadow(0 0 3px #ff7a2a) drop-shadow(0 0 12px #ff4a00); }
+  body[data-band="orange"] .colon-dot { background: #ff7a2a; }
+  body[data-band="orange"] #ampm-indicator { color: #ff7a2a; }
+  body[data-band="red"] .seg-on { fill: #ff2a2a; filter: drop-shadow(0 0 4px #ff2a2a) drop-shadow(0 0 14px #ff0000); }
+  body[data-band="red"] .colon-dot { background: #ff2a2a; }
+  body[data-band="red"] #ampm-indicator { color: #ff2a2a; }
+  body[data-band="red"] #status-line { color: #ff6a6a; }
+  body[data-band="red"] .colon-dot { animation: blink 1s ease-in-out infinite; }
+
+  body[data-band="late"] {
+    animation: lateflash 0.7s steps(2) infinite;
+  }
+
+  @keyframes lateflash {
+    0%, 49% { background: radial-gradient(ellipse at center, #4a0000 0%, #1a0000 100%); }
+    50%, 100% { background: radial-gradient(ellipse at center, #1a1a0f 0%, #0a0a00 100%); }
+  }
+
+  .gear {
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 72px;
+    height: 72px;
+    border: 0;
+    border-radius: 0 0 0 22px;
+    background: transparent;
+    color: rgba(51,255,102,0.28);
+    font-size: 28px;
+    font-family: inherit;
+    z-index: 110;
+    cursor: pointer;
+  }
+
+  .sheet-bg {
+    position: fixed;
+    inset: 0;
+    z-index: 120;
+    background: rgba(0, 0, 0, 0.62);
+    display: none;
+    align-items: flex-end;
+    pointer-events: auto;
+  }
+
+  .sheet-bg.open { display: flex; }
+
+  .sheet {
+    width: 100%;
+    max-height: 92dvh;
+    overflow: auto;
+    background: #10140c;
+    border-top: 1px solid rgba(51,255,102,0.35);
+    border-radius: 20px 20px 0 0;
+    padding: 1.2rem 1.2rem calc(1.2rem + env(safe-area-inset-bottom));
+    color: #33ff66;
+  }
+
+  .sheet h2 {
+    font-size: 1.6rem;
+    letter-spacing: 0.12em;
+    font-weight: 400;
+    margin-bottom: 0.2rem;
+  }
+
+  .sheet h3 {
+    font-size: 1.15rem;
+    letter-spacing: 0.14em;
+    font-weight: 400;
+    margin: 0.9rem 0 0.3rem;
+    color: #ccaa52;
+  }
+
+  .hint {
+    color: rgba(51,255,102,0.55);
+    font-size: 1.05rem;
+    line-height: 1.3;
+    margin: 0 0 0.7rem;
+  }
+
+  .row {
+    display: flex;
+    gap: 0.55rem;
+    flex-wrap: wrap;
+    margin: 0.55rem 0;
+  }
+
+  .sheet button {
+    font-family: inherit;
+    font-size: 1.15rem;
+    letter-spacing: 0.06em;
+    color: #33ff66;
+    background: #1a2414;
+    border: 1px solid rgba(51,255,102,0.3);
+    border-radius: 10px;
+    min-height: 48px;
+    padding: 0.5rem 0.9rem;
+    flex: 1 1 140px;
+    cursor: pointer;
+  }
+
+  .sheet button.on, .sheet .onoff.on {
+    background: #ccaa52;
+    color: #0a0a00;
+    border-color: #ccaa52;
+  }
+
+  label {
+    display: block;
+    font-size: 0.85rem;
+    letter-spacing: 0.12em;
+    color: rgba(51,255,102,0.5);
+    margin-bottom: 0.2rem;
+    text-transform: uppercase;
+  }
+
+  input[type="time"] {
+    width: 100%;
+    min-height: 46px;
+    border: 1px solid rgba(51,255,102,0.25);
+    border-radius: 8px;
+    background: #0a0c08;
+    color: #ffcc66;
+    font-family: inherit;
+    font-size: 1.2rem;
+    padding: 0 0.5rem;
+  }
+
+  .week-head, .day-row {
+    display: grid;
+    grid-template-columns: 3.4rem 4.6rem minmax(0, 1fr) minmax(0, 1fr);
+    gap: 0.4rem;
+    align-items: end;
+  }
+
+  .week-head {
+    font-size: 0.8rem;
+    letter-spacing: 0.12em;
+    color: rgba(51,255,102,0.4);
+    text-transform: uppercase;
+    margin-bottom: 0.3rem;
+  }
+
+  .day-row { margin-bottom: 0.4rem; }
+  .day-name { padding-bottom: 0.65rem; font-size: 1.2rem; }
+  .onoff { min-height: 46px; padding: 0 0.3rem; flex: none; }
+  .day-row.off input { opacity: 0.35; pointer-events: none; }
+
+  .week-val {
+    font-size: 1.25rem;
+    color: #ffcc66;
+    padding-bottom: 0.45rem;
+  }
+
+  .onoff[disabled] {
+    opacity: 1;
+    cursor: default;
+  }
+
+  .hidden { display: none !important; }
+</style>
 </head>
-<body data-band="plenty">
-  <button class="gear" id="gear" type="button" aria-label="Adult settings">⚙</button>
+<body data-mode="clock" data-band="plenty">
+<button class="gear" id="gear" type="button" aria-label="Adult settings">⚙</button>
+<div id="barrel-wrap">
+<div id="app">
 
-  <div class="overlay" id="start">
-    <p class="eyebrow">Friday demo</p>
-    <h1>Leave-by countdown</h1>
-    <p>One shared household clock. Alarm 6:35 · leave the house by 7:45. Tap to go full screen. Edit weekday times later in schedule.json.</p>
-    <button class="go" id="startBtn" type="button">Tap to start</button>
-  </div>
-
-  <main class="screen" id="clock" hidden>
-    <div class="eyebrow" id="eyebrow">Leave in</div>
-    <div class="time" id="time">70:00</div>
-    <div class="sub" id="sub">Fri · leave by 7:45 AM</div>
-  </main>
-
-  <div class="sheet-bg" id="sheetBg">
-    <div class="sheet" onclick="event.stopPropagation()">
-      <h2>Today (adult)</h2>
-      <p class="hint" id="modeHint">Demo pretends it is Friday 6:35 so you can see the countdown any time of day.</p>
-      <label for="leaveInput">Today’s leave-by</label>
-      <input id="leaveInput" type="time" value="07:45">
-      <div class="row">
-        <button type="button" id="applyLeave">Use this leave-by</button>
-        <button type="button" id="resetLeave">Friday default 7:45</button>
+  <!-- LEFT: Clock / leave-by countdown -->
+  <div id="left">
+    <div id="status-line"><span id="status-main"></span></div>
+    <div id="clock-display">
+      <div id="leave-now">DOWNSTAIRS NOW</div>
+      <!-- Hours or remaining minutes -->
+      <div class="digit-group" id="grp-hh">
+        <div class="digit-lg" id="d0"></div>
+        <div class="digit-lg" id="d1"></div>
       </div>
-      <div class="row">
-        <button type="button" id="jumpFive">Jump to 5 min left</button>
-        <button type="button" id="jumpZero">Hit zero</button>
+      <div class="colon-sep" id="col1">
+        <div class="colon-dot"></div>
+        <div class="colon-dot"></div>
       </div>
-      <div class="row">
-        <button type="button" id="toggleLive">Use real clock</button>
-        <button type="button" id="closeSheet">Close</button>
+      <!-- Minutes or remaining seconds -->
+      <div class="digit-group" id="grp-mm">
+        <div class="digit-lg" id="d2"></div>
+        <div class="digit-lg" id="d3"></div>
       </div>
+      <div id="ampm-indicator"></div>
     </div>
   </div>
 
-  <script>
-    // Friday example inlined so this file works from file:// without fetching schedule.json.
-    const FRIDAY = { alarm: "06:35", leaveBy: "07:45", label: "Late start Friday" };
+  <div id="divider"></div>
 
-    const $ = (id) => document.getElementById(id);
-    const start = $("start");
-    const clock = $("clock");
-    const timeEl = $("time");
-    const eyebrow = $("eyebrow");
-    const sub = $("sub");
-    const sheetBg = $("sheetBg");
-    const leaveInput = $("leaveInput");
-    const modeHint = $("modeHint");
+  <!-- RIGHT panel -->
+  <div id="right">
 
-    let live = false;
-    let leaveBy = FRIDAY.leaveBy;
-    let demoStartedAt = null;
-    let demoOffsetMs = 0;
+    <!-- TOP: Weather -->
+    <div id="panel-weather">
 
-    function parseHM(hm) {
-      const [h, m] = hm.split(":").map(Number);
-      return { h, m };
+      <div id="weather-body">
+        <div id="weather-icon" class="w-loading">···</div>
+        <div id="weather-temp"></div>
+        <div id="weather-desc"></div>
+      </div>
+
+      <div id="weather-bottom">
+        <div id="weather-city"></div>
+        <div id="weather-details">
+          <div class="detail-block">
+            <span class="detail-label">HIGH</span>
+            <span class="detail-value" id="high">—</span>
+          </div>
+          <div class="detail-block">
+            <span class="detail-label">FEELS</span>
+            <span class="detail-value" id="feels">—</span>
+          </div>
+          <div class="detail-block">
+            <span class="detail-label">WIND</span>
+            <span class="detail-value" id="wind">—</span>
+          </div>
+          <div class="detail-block">
+            <span class="detail-label">HUMID</span>
+            <span class="detail-value" id="humid">—</span>
+          </div>
+        </div>
+        <div id="forecast-row"></div>
+      </div>
+    </div>
+
+    <div id="panel-divider"></div>
+
+    <!-- BOTTOM: Calendar -->
+    <div id="panel-calendar">
+      <div id="cal-header"></div>
+      <div id="cal-grid"></div>
+    </div>
+
+  </div>
+
+</div>
+</div><!-- /barrel-wrap -->
+
+<div class="sheet-bg" id="sheetBg">
+  <div class="sheet" onclick="event.stopPropagation()">
+    <h2>WEEK FROM GITHUB</h2>
+    <p class="hint">Alarm and on-the-road times come from schedule.json. Change them in the repo (or ask Grok) and push. This tablet does not save a private week. Downstairs is 15 minutes before on-the-road. Off days never count down.</p>
+    <div class="week-head">
+      <span>Day</span><span>On</span><span>Alarm</span><span>On the road</span>
+    </div>
+    <div id="weekRows"></div>
+
+    <h3>TODAY ONLY</h3>
+    <p class="hint" id="modeHint">On-the-road override is this calendar date only. It does not change GitHub.</p>
+    <label for="leaveInput">Today’s on-the-road time</label>
+    <input id="leaveInput" type="time" value="07:45">
+    <div class="row">
+      <button type="button" id="applyLeave">Use this road time today</button>
+      <button type="button" id="resetLeave">Clear today’s override</button>
+    </div>
+
+    <h3>PREVIEW</h3>
+    <p class="hint">Does not change the real clock. Use this to see the countdown in the afternoon.</p>
+    <div class="row">
+      <button type="button" id="jumpFive">Jump to 5 min left</button>
+      <button type="button" id="jumpZero">Hit zero</button>
+      <button type="button" id="clearPreview">Back to live clock</button>
+    </div>
+    <div class="row">
+      <button type="button" id="closeSheet">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ================================================================
+   7-SEGMENT RENDERER
+   Segments: a=top, b=top-right, c=bot-right, d=bottom, e=bot-left, f=top-left, g=middle
+   ================================================================ */
+const SEG_MAP = {
+  0:[1,1,1,1,1,1,0],
+  1:[0,1,1,0,0,0,0],
+  2:[1,1,0,1,1,0,1],
+  3:[1,1,1,1,0,0,1],
+  4:[0,1,1,0,0,1,1],
+  5:[1,0,1,1,0,1,1],
+  6:[1,0,1,1,1,1,1],
+  7:[1,1,1,0,0,0,0],
+  8:[1,1,1,1,1,1,1],
+  9:[1,1,1,1,0,1,1]
+};
+
+function makeSvgDigit(w, h, segs) {
+  const t  = 0.13; // thickness ratio
+  const th = h * t;
+  const tw = w * t;
+  const g  = 2;   // gap between segments (px)
+
+  function on(i) { return segs[i] ? 'seg-on' : 'seg-off'; }
+
+  // Horizontal bar: full width minus corner gaps
+  function hbar(y, idx) {
+    const x0 = tw + g, x1 = w - tw - g, midY = y;
+    const pts = [
+      `${x0},${midY}`,
+      `${x0 + th/2},${midY - th/2}`,
+      `${x1 - th/2},${midY - th/2}`,
+      `${x1},${midY}`,
+      `${x1 - th/2},${midY + th/2}`,
+      `${x0 + th/2},${midY + th/2}`
+    ].join(' ');
+    return `<polygon class="${on(idx)}" points="${pts}"/>`;
+  }
+
+  // Vertical bar
+  function vbar(x, y0, y1, idx) {
+    const midX = x, top = y0 + g, bot = y1 - g;
+    const pts = [
+      `${midX},${top}`,
+      `${midX + tw/2},${top + tw/2}`,
+      `${midX + tw/2},${bot - tw/2}`,
+      `${midX},${bot}`,
+      `${midX - tw/2},${bot - tw/2}`,
+      `${midX - tw/2},${top + tw/2}`
+    ].join(' ');
+    return `<polygon class="${on(idx)}" points="${pts}"/>`;
+  }
+
+  const midY = h / 2;
+
+  const hasLit = segs.some(s => s === 1);
+
+  const defs = `<defs>
+    <filter id="recess" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+      <feFlood flood-color="#000000" flood-opacity="1" result="black"/>
+      <feComposite in="black" in2="SourceGraphic" operator="in" result="fill"/>
+      <feGaussianBlur in="fill" stdDeviation="1.2" result="blur"/>
+      <feOffset in="blur" dx="1" dy="1.5" result="shadow"/>
+      <feBlend in="SourceGraphic" in2="shadow" mode="multiply" result="shaded"/>
+      <feComponentTransfer in="shaded">
+        <feFuncA type="linear" slope="0.28"/>
+      </feComponentTransfer>
+    </filter>
+  </defs>`;
+
+  const svg = [
+    `<svg class="digit-svg" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg" style="overflow:visible">`,
+    defs,
+    hbar(th/2, 0),                          // a — top
+    vbar(w - tw/2, th/2, midY, 1),          // b — top-right
+    vbar(w - tw/2, midY, h - th/2, 2),      // c — bot-right
+    hbar(h - th/2, 3),                      // d — bottom
+    vbar(tw/2, midY, h - th/2, 4),          // e — bot-left
+    vbar(tw/2, th/2, midY, 5),              // f — top-left
+    hbar(midY, 6),                          // g — middle
+    `</svg>`
+  ].join('');
+  return svg;
+}
+
+function renderDigit(el, num) {
+  const isLg = el.classList.contains('digit-lg');
+  const w = isLg ? 178 : 124;
+  const h = isLg ? 288 : 204;
+  el.innerHTML = makeSvgDigit(w, h, SEG_MAP[num]);
+  const svg = el.querySelector('svg');
+  if (svg) { svg.style.width = '100%'; svg.style.height = '100%'; }
+}
+
+function setDigits(ids, str) {
+  str.split('').forEach((ch, i) => {
+    const el = document.getElementById(ids[i]);
+    if (el) renderDigit(el, parseInt(ch));
+  });
+}
+
+/* ================================================================
+   CLOCK + LEAVE-BY COUNTDOWN
+   Idle: 7-segment wall clock. Alarm → leave-by: remaining MM:SS.
+   ================================================================ */
+const DAYS   = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+const JS_TO_KEY = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+const WEEK_ORDER = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+const SHORT = {
+  monday:'MON', tuesday:'TUE', wednesday:'WED', thursday:'THU',
+  friday:'FRI', saturday:'SAT', sunday:'SUN'
+};
+const STORAGE_TODAY = 'morning-board-today';
+
+const DEFAULT_SCHEDULE = {
+  days: {
+    monday:    { enabled: true,  label: 'School day',        alarm: '06:15', leaveBy: '07:15' },
+    tuesday:   { enabled: true,  label: 'School day',        alarm: '06:15', leaveBy: '07:15' },
+    wednesday: { enabled: true,  label: 'School day',        alarm: '06:15', leaveBy: '07:15' },
+    thursday:  { enabled: true,  label: 'School day',        alarm: '06:15', leaveBy: '07:15' },
+    friday:    { enabled: true,  label: 'Late start Friday', alarm: '06:35', leaveBy: '07:45' },
+    saturday:  { enabled: false, label: 'No school',         alarm: null,    leaveBy: null },
+    sunday:    { enabled: false, label: 'No school',         alarm: null,    leaveBy: null }
+  }
+};
+
+const BREAKFAST_MS = 15 * 60 * 1000;
+const LATE_HOLD_MS = 5 * 60 * 1000;
+let schedule = JSON.parse(JSON.stringify(DEFAULT_SCHEDULE));
+let preview = null; // { sim: number, wall: number } | null
+
+function pad2(n) { return String(n).padStart(2,'0'); }
+
+function parseHM(hm) {
+  const [h, m] = String(hm).split(':').map(Number);
+  return { h, m };
+}
+
+function todayAt(hm, base) {
+  const { h, m } = parseHM(hm);
+  const d = new Date(base.getTime());
+  d.setHours(h, m, 0, 0);
+  return d;
+}
+
+function formatClock(hm) {
+  if (!hm) return '—';
+  const { h, m } = parseHM(hm);
+  const suffix = h >= 12 ? 'PM' : 'AM';
+  const h12 = h % 12 || 12;
+  return h12 + ':' + pad2(m) + ' ' + suffix;
+}
+
+function dateStamp(d) {
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+}
+
+function applyScheduleData(data) {
+  if (!data || !data.days) return false;
+  let changed = false;
+  WEEK_ORDER.forEach(function (key) {
+    const src = data.days[key];
+    if (!src) return;
+    const next = {
+      enabled: !!src.enabled,
+      label: src.label || (schedule.days[key] && schedule.days[key].label) || '',
+      alarm: src.alarm || null,
+      leaveBy: src.leaveBy || null
+    };
+    const cur = schedule.days[key];
+    if (!cur || cur.enabled !== next.enabled || cur.alarm !== next.alarm || cur.leaveBy !== next.leaveBy) {
+      changed = true;
     }
+    schedule.days[key] = next;
+  });
+  return changed;
+}
 
-    function formatClock(hm) {
-      const { h, m } = parseHM(hm);
-      const suffix = h >= 12 ? "PM" : "AM";
-      const h12 = h % 12 || 12;
-      return h12 + ":" + String(m).padStart(2, "0") + " " + suffix;
-    }
-
-    function todayAt(hm, base) {
-      const { h, m } = parseHM(hm);
-      const d = new Date(base.getTime());
-      d.setHours(h, m, 0, 0);
-      return d;
-    }
-
-    function pad(n) { return String(n).padStart(2, "0"); }
-
-    function remainingParts(ms) {
-      const late = ms < 0;
-      const abs = Math.abs(ms);
-      const totalSec = Math.floor(abs / 1000);
-      const minutes = Math.floor(totalSec / 60);
-      const seconds = totalSec % 60;
-      return { late, minutes, seconds, ms };
-    }
-
-    function bandFor(ms) {
-      if (ms <= 0) return "late";
-      if (ms <= 5 * 60 * 1000) return "red";
-      if (ms <= 10 * 60 * 1000) return "orange";
-      if (ms <= 20 * 60 * 1000) return "amber";
-      return "plenty";
-    }
-
-    function now() {
-      if (live) return new Date();
-      if (!demoStartedAt) return todayAt(FRIDAY.alarm, new Date());
-      return new Date(demoStartedAt.getTime() + (Date.now() - demoStartedAt) + demoOffsetMs);
-    }
-
-    function weekdayName(d) {
-      return d.toLocaleDateString("en-US", { weekday: "short" });
-    }
-
-    function render() {
-      const n = now();
-      const leave = todayAt(leaveBy, n);
-      const alarm = todayAt(FRIDAY.alarm, n);
-      const ms = leave.getTime() - n.getTime();
-      const parts = remainingParts(ms);
-      const band = bandFor(ms);
-      document.body.dataset.band = band;
-      document.body.style.background = "";
-
-      sub.textContent = weekdayName(n) + " · leave by " + formatClock(leaveBy);
-
-      if (!live && n < alarm && demoOffsetMs === 0) {
-        // Demo starts at alarm; this branch is for live mornings before 6:35.
-      }
-
-      if (live && n < alarm) {
-        eyebrow.textContent = "Countdown starts at";
-        timeEl.className = "time";
-        timeEl.textContent = formatClock(FRIDAY.alarm);
-        return;
-      }
-
-      if (parts.late) {
-        eyebrow.textContent = "Leave now";
-        timeEl.className = "now-word";
-        timeEl.textContent = "NOW";
-        sub.textContent = "+" + parts.minutes + ":" + pad(parts.seconds) + " late · " + formatClock(leaveBy);
-        return;
-      }
-
-      eyebrow.textContent = "Leave in";
-      timeEl.className = "time";
-      timeEl.textContent = parts.minutes + ":" + pad(parts.seconds);
-    }
-
-    function startDemo(fromAlarm) {
-      live = false;
-      demoOffsetMs = 0;
-      const wall = new Date();
-      demoStartedAt = todayAt(fromAlarm ? FRIDAY.alarm : leaveBy, wall);
-      // Align demo "now" to alarm (or leave-by if jumping), then let wall time advance it.
-      const intended = todayAt(fromAlarm ? FRIDAY.alarm : leaveBy, wall);
-      demoStartedAt = new Date(intended.getTime() - (Date.now() - Date.now()));
-      // Store the demo epoch as "this wall-clock instant maps to intended".
-      window._demoEpochWall = Date.now();
-      window._demoEpochSim = intended.getTime();
-      modeHint.textContent = "Demo pretends it is Friday morning. Use real clock for an actual school day.";
-      $("toggleLive").textContent = "Use real clock";
-    }
-
-    function simNow() {
-      if (live) return new Date();
-      const sim = window._demoEpochSim + (Date.now() - window._demoEpochWall) + demoOffsetMs;
-      return new Date(sim);
-    }
-
-    now = function () { return simNow(); };
-
-    function jumpToRemaining(msLeft) {
-      live = false;
-      const wall = new Date();
-      const leave = todayAt(leaveBy, wall);
-      window._demoEpochSim = leave.getTime() - msLeft;
-      window._demoEpochWall = Date.now();
-      demoOffsetMs = 0;
-      $("toggleLive").textContent = "Use real clock";
-      modeHint.textContent = "Demo jump. This is not the real time of day.";
-      render();
-    }
-
-    function enter() {
-      start.classList.add("hidden");
-      clock.hidden = false;
-      const el = document.documentElement;
-      if (el.requestFullscreen) el.requestFullscreen().catch(function () {});
-      startDemo(true);
-      render();
-    }
-
-    $("startBtn").addEventListener("click", enter);
-    $("gear").addEventListener("click", function () {
-      leaveInput.value = leaveBy;
-      sheetBg.classList.add("open");
+function fetchSchedule() {
+  return fetch('schedule.json', { cache: 'no-store' }).then(function (res) {
+    if (!res.ok) return;
+    return res.json().then(function (data) {
+      if (applyScheduleData(data)) tickClock();
     });
-    sheetBg.addEventListener("click", function () { sheetBg.classList.remove("open"); });
-    $("closeSheet").addEventListener("click", function () { sheetBg.classList.remove("open"); });
-    $("applyLeave").addEventListener("click", function () {
-      if (leaveInput.value) leaveBy = leaveInput.value;
-      sheetBg.classList.remove("open");
-      render();
-    });
-    $("resetLeave").addEventListener("click", function () {
-      leaveBy = FRIDAY.leaveBy;
-      leaveInput.value = leaveBy;
-      render();
-    });
-    $("jumpFive").addEventListener("click", function () { jumpToRemaining(5 * 60 * 1000); });
-    $("jumpZero").addEventListener("click", function () { jumpToRemaining(0); });
-    $("toggleLive").addEventListener("click", function () {
-      live = !live;
-      demoOffsetMs = 0;
-      if (!live) startDemo(true);
-      $("toggleLive").textContent = live ? "Back to Friday demo" : "Use real clock";
-      modeHint.textContent = live
-        ? "Using this tablet’s clock. If it is not Friday morning you may see the waiting state or a different remaining time."
-        : "Demo pretends it is Friday morning.";
-      sheetBg.classList.remove("open");
-      render();
-    });
+  }).catch(function () {});
+}
 
-    window._demoEpochSim = todayAt(FRIDAY.alarm, new Date()).getTime();
-    window._demoEpochWall = Date.now();
-    setInterval(render, 250);
-  </script>
+function getTodayOverride(d) {
+  try {
+    const raw = localStorage.getItem(STORAGE_TODAY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.date === dateStamp(d) && parsed.leaveBy) return parsed.leaveBy;
+  } catch (e) {}
+  return null;
+}
+
+function now() {
+  if (!preview) return new Date();
+  return new Date(preview.sim + (Date.now() - preview.wall));
+}
+
+function downstairsHm(leaveHm) {
+  const { h, m } = parseHM(leaveHm);
+  let total = h * 60 + m - 15;
+  if (total < 0) total += 24 * 60;
+  return pad2(Math.floor(total / 60)) + ':' + pad2(total % 60);
+}
+
+function leaveByFor(d) {
+  const day = schedule.days[JS_TO_KEY[d.getDay()]];
+  const over = getTodayOverride(d);
+  if (over) return over;
+  return day && day.leaveBy ? day.leaveBy : null;
+}
+
+function bandFor(ms) {
+  if (ms <= 0) return 'late';
+  if (ms <= 5 * 60 * 1000) return 'red';
+  if (ms <= 10 * 60 * 1000) return 'orange';
+  if (ms <= 20 * 60 * 1000) return 'amber';
+  return 'plenty';
+}
+
+function morningOver(n, downstairs) {
+  return n.getTime() >= downstairs.getTime() + LATE_HOLD_MS;
+}
+
+function morningState(n) {
+  const key = JS_TO_KEY[n.getDay()];
+  const day = schedule.days[key];
+  const leaveHm = leaveByFor(n);
+
+  if (!day || !day.enabled || !day.alarm || !leaveHm) {
+    return { mode: 'clock' };
+  }
+
+  const alarm = todayAt(day.alarm, n);
+  const road = todayAt(leaveHm, n);
+  const down = new Date(road.getTime() - BREAKFAST_MS);
+  const downHm = downstairsHm(leaveHm);
+
+  if (n < alarm) return { mode: 'clock' };
+  if (morningOver(n, down)) return { mode: 'clock' };
+
+  const ms = down.getTime() - n.getTime();
+  if (ms <= 0) return { mode: 'late', ms: ms, downHm: downHm, leaveHm: leaveHm };
+  return { mode: 'countdown', ms: ms, downHm: downHm, leaveHm: leaveHm };
+}
+
+function showClockDigits(d) {
+  let hr = d.getHours();
+  const ampm = hr >= 12 ? 'PM' : 'AM';
+  hr = hr % 12 || 12;
+  setDigits(['d0','d1'], pad2(hr));
+  setDigits(['d2','d3'], pad2(d.getMinutes()));
+  document.getElementById('ampm-indicator').textContent = ampm;
+}
+
+function showRemainDigits(ms) {
+  const abs = Math.abs(ms);
+  const totalSec = Math.floor(abs / 1000);
+  const minutes = Math.min(99, Math.floor(totalSec / 60));
+  const seconds = totalSec % 60;
+  setDigits(['d0','d1'], pad2(minutes));
+  setDigits(['d2','d3'], pad2(seconds));
+  document.getElementById('ampm-indicator').textContent = 'LEFT';
+}
+
+function tickClock() {
+  const n = now();
+  const state = morningState(n);
+  const status = document.getElementById('status-main');
+  const dateBit = DAYS[n.getDay()] + ' ' + n.getDate() + ' ' + MONTHS[n.getMonth()];
+
+  document.body.dataset.mode = state.mode;
+
+  if (state.mode === 'clock') {
+    document.body.dataset.band = 'plenty';
+    showClockDigits(n);
+    status.innerHTML = dateBit;
+    return;
+  }
+
+  document.body.dataset.band = bandFor(state.ms);
+  const downLabel = formatClock(state.downHm);
+
+  if (state.mode === 'countdown') {
+    showRemainDigits(state.ms);
+    status.innerHTML = 'DOWNSTAIRS BY <span class="amber">' + downLabel + '</span>';
+    return;
+  }
+
+  const late = remainingLate(state.ms);
+  showRemainDigits(0);
+  status.innerHTML = '+' + late + ' LATE · ' + downLabel;
+}
+
+function remainingLate(ms) {
+  const abs = Math.abs(ms);
+  const totalSec = Math.floor(abs / 1000);
+  const minutes = Math.floor(totalSec / 60);
+  const seconds = totalSec % 60;
+  return minutes + ':' + pad2(seconds);
+}
+
+function startPreview(msLeft) {
+  const wall = new Date();
+  const leaveHm = leaveByFor(wall) || schedule.days.friday.leaveBy;
+  const down = todayAt(downstairsHm(leaveHm), wall);
+  preview = { sim: down.getTime() - msLeft, wall: Date.now() };
+  document.getElementById('modeHint').textContent = 'Preview running. Back to live clock when done.';
+  tickClock();
+}
+
+try { localStorage.removeItem('morning-board-schedule'); } catch (e) {}
+tickClock();
+setInterval(tickClock, 250);
+fetchSchedule();
+setInterval(fetchSchedule, 60 * 1000);
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState === 'visible') fetchSchedule();
+});
+
+/* ================================================================
+   WEEK EDITOR
+   ================================================================ */
+const weekRows = document.getElementById('weekRows');
+const sheetBg = document.getElementById('sheetBg');
+const leaveInput = document.getElementById('leaveInput');
+
+function buildWeekRows() {
+  weekRows.innerHTML = '';
+  WEEK_ORDER.forEach(function (key) {
+    const day = schedule.days[key];
+    const row = document.createElement('div');
+    row.className = 'day-row' + (day.enabled ? '' : ' off');
+    row.innerHTML =
+      '<div class="day-name">' + SHORT[key] + '</div>' +
+      '<button type="button" class="onoff' + (day.enabled ? ' on' : '') + '" disabled>' +
+        (day.enabled ? 'ON' : 'OFF') +
+      '</button>' +
+      '<div><label>Alarm</label><div class="week-val">' + (day.enabled && day.alarm ? formatClock(day.alarm) : '—') + '</div></div>' +
+      '<div><label>On the road</label><div class="week-val">' + (day.enabled && day.leaveBy ? formatClock(day.leaveBy) : '—') + '</div></div>';
+    weekRows.appendChild(row);
+  });
+}
+
+document.getElementById('gear').addEventListener('click', function () {
+  buildWeekRows();
+  const n = now();
+  leaveInput.value = leaveByFor(n) || '07:45';
+  sheetBg.classList.add('open');
+});
+sheetBg.addEventListener('click', function () { sheetBg.classList.remove('open'); });
+document.getElementById('closeSheet').addEventListener('click', function () { sheetBg.classList.remove('open'); });
+document.getElementById('applyLeave').addEventListener('click', function () {
+  if (!leaveInput.value) return;
+  localStorage.setItem(STORAGE_TODAY, JSON.stringify({ date: dateStamp(new Date()), leaveBy: leaveInput.value }));
+  sheetBg.classList.remove('open');
+  tickClock();
+});
+document.getElementById('resetLeave').addEventListener('click', function () {
+  localStorage.removeItem(STORAGE_TODAY);
+  leaveInput.value = leaveByFor(now()) || '07:45';
+  tickClock();
+});
+document.getElementById('jumpFive').addEventListener('click', function () {
+  startPreview(5 * 60 * 1000);
+  sheetBg.classList.remove('open');
+});
+document.getElementById('jumpZero').addEventListener('click', function () {
+  startPreview(0);
+  sheetBg.classList.remove('open');
+});
+document.getElementById('clearPreview').addEventListener('click', function () {
+  preview = null;
+  document.getElementById('modeHint').textContent = 'On-the-road override is this calendar date only. It does not change GitHub.';
+  sheetBg.classList.remove('open');
+  tickClock();
+});
+
+/* ================================================================
+   WEATHER — PIP-BOY LINE ART SVG ICONS
+   All icons: viewBox 0 0 100 100, stroke=#33ff66, fill=none, strokeWidth~4-5
+   ================================================================ */
+
+const S = (paths) => `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;overflow:visible" fill="none" stroke="#33ff66" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+
+const ICONS = {
+  sun: S(`
+    <circle cx="50" cy="50" r="18" stroke-width="2.5"/>
+    <line x1="50" y1="8"  x2="50" y2="18"/>
+    <line x1="50" y1="82" x2="50" y2="92"/>
+    <line x1="8"  y1="50" x2="18" y2="50"/>
+    <line x1="82" y1="50" x2="92" y2="50"/>
+    <line x1="21" y1="21" x2="28" y2="28"/>
+    <line x1="72" y1="72" x2="79" y2="79"/>
+    <line x1="79" y1="21" x2="72" y2="28"/>
+    <line x1="28" y1="72" x2="21" y2="79"/>
+  `),
+  moon: S(`
+    <path d="M55 15 A32 32 0 1 0 55 85 A22 22 0 1 1 55 15Z" stroke-width="2.5"/>
+  `),
+  partlyCloudy: S(`
+    <circle cx="38" cy="42" r="14" stroke-width="2.5"/>
+    <line x1="38" y1="14" x2="38" y2="22"/>
+    <line x1="14" y1="42" x2="22" y2="42"/>
+    <line x1="17" y1="21" x2="23" y2="27"/>
+    <line x1="59" y1="21" x2="53" y2="27"/>
+    <path d="M28 58 Q20 58 20 66 Q20 74 30 74 L72 74 Q82 74 82 65 Q82 56 72 56 Q70 44 58 44 Q46 44 44 55 Q36 54 28 58Z" stroke-width="2.5"/>
+  `),
+  partlyCloudyNight: S(`
+    <path d="M36 18 A16 16 0 1 0 36 48 A11 11 0 1 1 36 18Z" stroke-width="2.5"/>
+    <path d="M28 52 Q20 52 20 60 Q20 68 30 68 L72 68 Q82 68 82 59 Q82 50 72 50 Q70 38 58 38 Q46 38 44 49 Q36 48 28 52Z" stroke-width="2.5"/>
+  `),
+  cloud: S(`
+    <path d="M18 62 Q10 62 10 72 Q10 82 22 82 L78 82 Q90 82 90 72 Q90 62 78 62 Q76 46 60 46 Q46 46 42 58 Q30 56 18 62Z" stroke-width="2.5"/>
+  `),
+  fog: S(`
+    <path d="M15 35 Q50 28 85 35"/>
+    <path d="M10 50 Q50 43 90 50"/>
+    <path d="M15 65 Q50 58 85 65"/>
+    <path d="M25 80 Q50 73 75 80"/>
+  `),
+  drizzle: S(`
+    <path d="M22 48 Q14 48 14 56 Q14 64 24 64 L70 64 Q80 64 80 55 Q80 46 70 46 Q68 34 56 34 Q44 34 40 45 Q31 44 22 48Z" stroke-width="2.5"/>
+    <line x1="36" y1="72" x2="32" y2="84"/>
+    <line x1="52" y1="72" x2="48" y2="84"/>
+  `),
+  rain: S(`
+    <path d="M22 44 Q14 44 14 52 Q14 60 24 60 L70 60 Q80 60 80 51 Q80 42 70 42 Q68 30 56 30 Q44 30 40 41 Q31 40 22 44Z" stroke-width="2.5"/>
+    <line x1="30" y1="68" x2="24" y2="84"/>
+    <line x1="46" y1="68" x2="40" y2="84"/>
+    <line x1="62" y1="68" x2="56" y2="84"/>
+  `),
+  heavyRain: S(`
+    <path d="M22 40 Q14 40 14 48 Q14 56 24 56 L70 56 Q80 56 80 47 Q80 38 70 38 Q68 26 56 26 Q44 26 40 37 Q31 36 22 40Z" stroke-width="2.5"/>
+    <line x1="24" y1="64" x2="16" y2="82"/>
+    <line x1="38" y1="64" x2="30" y2="82"/>
+    <line x1="52" y1="64" x2="44" y2="82"/>
+    <line x1="66" y1="64" x2="58" y2="82"/>
+  `),
+  snow: S(`
+    <path d="M22 44 Q14 44 14 52 Q14 60 24 60 L70 60 Q80 60 80 51 Q80 42 70 42 Q68 30 56 30 Q44 30 40 41 Q31 40 22 44Z" stroke-width="2.5"/>
+    <line x1="34" y1="70" x2="34" y2="84"/>
+    <line x1="28" y1="74" x2="40" y2="80"/>
+    <line x1="40" y1="74" x2="28" y2="80"/>
+    <line x1="54" y1="70" x2="54" y2="84"/>
+    <line x1="48" y1="74" x2="60" y2="80"/>
+    <line x1="60" y1="74" x2="48" y2="80"/>
+  `),
+  heavySnow: S(`
+    <path d="M22 38 Q14 38 14 46 Q14 54 24 54 L70 54 Q80 54 80 45 Q80 36 70 36 Q68 24 56 24 Q44 24 40 35 Q31 34 22 38Z" stroke-width="2.5"/>
+    <line x1="26" y1="64" x2="26" y2="80"/>
+    <line x1="19" y1="69" x2="33" y2="75"/>
+    <line x1="33" y1="69" x2="19" y2="75"/>
+    <line x1="44" y1="64" x2="44" y2="80"/>
+    <line x1="37" y1="69" x2="51" y2="75"/>
+    <line x1="51" y1="69" x2="37" y2="75"/>
+    <line x1="62" y1="64" x2="62" y2="80"/>
+    <line x1="55" y1="69" x2="69" y2="75"/>
+    <line x1="69" y1="69" x2="55" y2="75"/>
+  `),
+  storm: S(`
+    <path d="M20 38 Q12 38 12 46 Q12 54 22 54 L68 54 Q78 54 78 45 Q78 36 68 36 Q66 24 54 24 Q42 24 38 35 Q29 34 20 38Z" stroke-width="2.5"/>
+    <polyline points="52,54 42,70 52,70 38,90" stroke-width="2.8"/>
+  `),
+  unknown: S(`
+    <circle cx="50" cy="50" r="38" stroke-width="2.5"/>
+    <line x1="30" y1="30" x2="70" y2="70"/>
+    <line x1="70" y1="30" x2="30" y2="70"/>
+  `)
+};
+
+const WMO = {
+  0:  { icon: ICONS.sun,        desc:'CLEAR SKY' },
+  1:  { icon: ICONS.sun,        desc:'MAINLY CLEAR' },
+  2:  { icon: ICONS.partlyCloudy, desc:'PARTLY CLOUDY' },
+  3:  { icon: ICONS.cloud,      desc:'OVERCAST' },
+  45: { icon: ICONS.fog,        desc:'FOGGY' },
+  48: { icon: ICONS.fog,        desc:'DEPOSITING FOG' },
+  51: { icon: ICONS.drizzle,    desc:'LIGHT DRIZZLE' },
+  53: { icon: ICONS.drizzle,    desc:'DRIZZLE' },
+  55: { icon: ICONS.rain,       desc:'HEAVY DRIZZLE' },
+  61: { icon: ICONS.rain,       desc:'LIGHT RAIN' },
+  63: { icon: ICONS.rain,       desc:'RAIN' },
+  65: { icon: ICONS.heavyRain,  desc:'HEAVY RAIN' },
+  71: { icon: ICONS.snow,       desc:'LIGHT SNOW' },
+  73: { icon: ICONS.snow,       desc:'SNOW' },
+  75: { icon: ICONS.heavySnow,  desc:'HEAVY SNOW' },
+  77: { icon: ICONS.snow,       desc:'SNOW GRAINS' },
+  80: { icon: ICONS.drizzle,    desc:'LIGHT SHOWERS' },
+  81: { icon: ICONS.rain,       desc:'SHOWERS' },
+  82: { icon: ICONS.heavyRain,  desc:'HEAVY SHOWERS' },
+  85: { icon: ICONS.snow,       desc:'SNOW SHOWERS' },
+  86: { icon: ICONS.heavySnow,  desc:'HEAVY SNOW SHOWERS' },
+  95: { icon: ICONS.storm,      desc:'THUNDERSTORM' },
+  96: { icon: ICONS.storm,      desc:'STORM W/ HAIL' },
+  99: { icon: ICONS.storm,      desc:'STORM W/ HEAVY HAIL' },
+};
+
+function wmoInfo(code, isDay = true) {
+  const info = WMO[code] || { icon: ICONS.unknown, desc:'UNKNOWN' };
+  if (!isDay) {
+    if (code === 0) return { icon: ICONS.moon, desc: 'CLEAR SKY' };
+    if (code === 1) return { icon: ICONS.moon, desc: 'MAINLY CLEAR' };
+    if (code === 2) return { icon: ICONS.partlyCloudyNight, desc: 'PARTLY CLOUDY' };
+  }
+  return info;
+}
+
+async function fetchWeather(lat, lon) {
+  const iconEl     = document.getElementById('weather-icon');
+  const tempEl     = document.getElementById('weather-temp');
+  const descEl     = document.getElementById('weather-desc');
+  const feelsEl    = document.getElementById('feels');
+  const windEl     = document.getElementById('wind');
+  const humidEl    = document.getElementById('humid');
+  const highEl     = document.getElementById('high');
+  const forecastEl = document.getElementById('forecast-row');
+  const cityEl     = document.getElementById('weather-city');
+  cityEl.textContent = '';
+
+  iconEl.className = 'w-loading';
+  iconEl.innerHTML = '';
+  iconEl.textContent = '···';
+  tempEl.textContent = '';
+  descEl.textContent = '';
+  feelsEl.textContent = '—';
+  windEl.textContent  = '—';
+  humidEl.textContent = '—';
+  highEl.textContent  = '—';
+
+  const useLat = lat ?? 33.6695;
+  const useLon = lon ?? -117.8231;
+
+  const DAYNAMES = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+
+  try {
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${useLat}&longitude=${useLon}`
+      + `&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day`
+      + `&hourly=temperature_2m`
+      + `&daily=temperature_2m_max,weather_code`
+      + `&temperature_unit=fahrenheit&wind_speed_unit=mph`
+      + `&timezone=auto&forecast_days=7&models=gfs_seamless`;
+
+    const res  = await fetch(url);
+    const data = await res.json();
+    const cur   = data.current;
+    const daily  = data.daily;
+    const hourly = data.hourly;
+
+    // Find current hour index in hourly array and compare next hour
+    const nowIso    = cur.time; // e.g. "2026-05-02T14:00"
+    const curIdx    = hourly.time.findIndex(t => t === nowIso);
+    const nextTemp  = curIdx >= 0 && curIdx + 1 < hourly.temperature_2m.length
+                      ? hourly.temperature_2m[curIdx + 1]
+                      : null;
+    const trendArrow = nextTemp === null ? ''
+                     : nextTemp > cur.temperature_2m + 0.3 ? ' ↑'
+                     : nextTemp < cur.temperature_2m - 0.3 ? ' ↓'
+                     : ' →';
+
+    const isDay = cur.is_day === 1;
+    const info = wmoInfo(cur.weather_code, isDay);
+    const temp = Math.round(cur.temperature_2m);
+    const feel = Math.round(cur.apparent_temperature);
+    const wind = Math.round(cur.wind_speed_10m);
+    const hum  = Math.round(cur.relative_humidity_2m);
+    const todayHigh = Math.round(daily.temperature_2m_max[0]);
+
+    iconEl.className = '';
+    iconEl.innerHTML = info.icon;
+    tempEl.innerHTML = `${temp}°<span id="temp-arrow">${trendArrow}</span>`;
+    descEl.textContent = info.desc;
+    feelsEl.textContent = `${feel}°`;
+    windEl.textContent  = `${wind}MPH`;
+    humidEl.textContent = `${hum}%`;
+    highEl.textContent  = `${todayHigh}°`;
+
+    // 5-day forecast — skip today (index 0), show next 5
+    let fcHtml = '';
+    for (let i = 1; i <= 5; i++) {
+      const date    = new Date(daily.time[i] + 'T12:00:00');
+      const dayName = DAYNAMES[date.getDay()];
+      const high    = Math.round(daily.temperature_2m_max[i]);
+      const finfo   = wmoInfo(daily.weather_code[i]);
+      fcHtml += `
+        <div class="fc-day">
+          <span class="fc-name">${dayName}</span>
+          <div class="fc-icon">${finfo.icon}</div>
+          <span class="fc-high">${high}°</span>
+        </div>`;
+    }
+    forecastEl.innerHTML = fcHtml;
+
+    // Reverse geocode to get city name
+    try {
+      const geoRes  = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${useLat}&lon=${useLon}&format=json`);
+      const geoData = await geoRes.json();
+      const city    = geoData.address.city
+                   || geoData.address.town
+                   || geoData.address.village
+                   || geoData.address.county
+                   || '';
+      const state   = geoData.address.state_code || geoData.address.state || '';
+      cityEl.textContent = city && state ? `${city}, ${state}` : city || state;
+    } catch {
+      cityEl.textContent = '';
+    }
+
+  } catch(e) {
+    iconEl.className = '';
+    iconEl.innerHTML = ICONS.unknown;
+    descEl.textContent = 'FETCH ERROR';
+  }
+}
+
+/* ================================================================
+   CALENDAR
+   ================================================================ */
+const DOW = ['S','M','T','W','T','F','S'];
+
+function renderCalendar() {
+  const now   = new Date();
+  const year  = now.getFullYear();
+  const month = now.getMonth();
+  const today = now.getDate();
+
+  const monthName = MONTHS[month];
+  document.getElementById('cal-header').textContent = `${monthName} ${year}`;
+
+  const firstDow  = new Date(year, month, 1).getDay(); // 0=Sun
+  const daysInMo  = new Date(year, month + 1, 0).getDate();
+
+  let html = DOW.map(d => `<div class="cal-dow">${d}</div>`).join('');
+
+  for (let i = 0; i < firstDow; i++) {
+    html += `<div class="cal-day empty">·</div>`;
+  }
+  for (let d = 1; d <= daysInMo; d++) {
+    const cls = d === today ? 'cal-day today' : 'cal-day';
+    html += `<div class="${cls}">${d}</div>`;
+  }
+
+  document.getElementById('cal-grid').innerHTML = html;
+}
+
+renderCalendar();
+
+let _weatherLat = null, _weatherLon = null;
+
+function initWeather() {
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        _weatherLat = pos.coords.latitude;
+        _weatherLon = pos.coords.longitude;
+        fetchWeather(_weatherLat, _weatherLon);
+      },
+      () => fetchWeather()
+    );
+  } else {
+    fetchWeather();
+  }
+}
+
+initWeather();
+setInterval(() => fetchWeather(_weatherLat, _weatherLon), 10 * 60 * 1000);
+</script>
 </body>
 </html>
