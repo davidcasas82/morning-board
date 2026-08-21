@@ -4,9 +4,10 @@
   "notes": [
     "ONE shared household clock. Not a clock per kid. One alarm and one leaveBy per weekday.",
     "leaveBy is on-the-road time. Downstairs is 15 minutes before that.",
-    "Monday, Wednesday, Thursday: alarm 06:00 / on the road 07:10 (confirmed).",
-    "Tuesday is still a placeholder. David did not give Tuesday times.",
-    "Friday: alarm 06:30 / on the road 07:40 (confirmed late start).",
+    "School mornings at this house: Monday, Thursday, Friday only.",
+    "Tuesday and Wednesday are off. Kids do not wake up here those days.",
+    "Monday and Thursday: alarm 06:00 / on the road 07:10.",
+    "Friday: alarm 06:30 / on the road 07:40 (late start).",
     "Saturday and Sunday are off."
   ],
   "days": {
@@ -16,23 +17,23 @@
       "alarm": "06:00",
       "leaveBy": "07:10",
       "status": "confirmed",
-      "comment": "Alarm 6:00 AM. On the road 7:10 AM. Downstairs 6:55 AM."
+      "comment": "Wake here. Alarm 6:00 AM. On the road 7:10 AM. Downstairs 6:55 AM."
     },
     "tuesday": {
-      "enabled": true,
-      "label": "School day",
-      "alarm": "06:15",
-      "leaveBy": "07:15",
-      "status": "placeholder",
-      "comment": "Not given with Mon/Wed/Thu. Still a guess. Fill in real alarm and on-the-road time."
+      "enabled": false,
+      "label": "Not here",
+      "alarm": null,
+      "leaveBy": null,
+      "status": "off",
+      "comment": "Kids do not wake up at this house on Tuesday."
     },
     "wednesday": {
-      "enabled": true,
-      "label": "School day",
-      "alarm": "06:00",
-      "leaveBy": "07:10",
-      "status": "confirmed",
-      "comment": "Alarm 6:00 AM. On the road 7:10 AM. Downstairs 6:55 AM."
+      "enabled": false,
+      "label": "Not here",
+      "alarm": null,
+      "leaveBy": null,
+      "status": "off",
+      "comment": "Kids do not wake up at this house on Wednesday."
     },
     "thursday": {
       "enabled": true,
@@ -40,7 +41,7 @@
       "alarm": "06:00",
       "leaveBy": "07:10",
       "status": "confirmed",
-      "comment": "Alarm 6:00 AM. On the road 7:10 AM. Downstairs 6:55 AM."
+      "comment": "Wake here. Alarm 6:00 AM. On the road 7:10 AM. Downstairs 6:55 AM."
     },
     "friday": {
       "enabled": true,
@@ -48,7 +49,7 @@
       "alarm": "06:30",
       "leaveBy": "07:40",
       "status": "confirmed",
-      "comment": "Alarm 6:30 AM. On the road 7:40 AM. Downstairs 7:25 AM."
+      "comment": "Wake here. Alarm 6:30 AM. On the road 7:40 AM. Downstairs 7:25 AM."
     },
     "saturday": {
       "enabled": false,
@@ -56,7 +57,7 @@
       "alarm": null,
       "leaveBy": null,
       "status": "off",
-      "comment": "No weekend schedule invented."
+      "comment": "No weekend schedule."
     },
     "sunday": {
       "enabled": false,
@@ -64,7 +65,7 @@
       "alarm": null,
       "leaveBy": null,
       "status": "off",
-      "comment": "No weekend schedule invented."
+      "comment": "No weekend schedule."
     }
   }
 }
