@@ -33,12 +33,6 @@
     );
     pointer-events: none;
     z-index: 100;
-    animation: scanroll 20s linear infinite;
-  }
-
-  @keyframes scanroll {
-    0% { background-position: 0 0; }
-    100% { background-position: 0 80px; }
   }
 
   /* Vignette + corner darkening */
@@ -178,10 +172,10 @@
   /* Digit container also needs overflow visible so the SVG glow isn't cropped by the div */
   .digit-lg, .digit-sm { overflow: visible; }
 
-  /* Lit segments emit amber glow — reduced 20% brightness */
-  .seg-on  { fill: #ccaa52; filter: drop-shadow(0 0 3px #ccaa52) drop-shadow(0 0 9px #cc8829) drop-shadow(0 0 20px #cc660066); }
-  /* Unlit: dark recessed channel, no glow */
-  .seg-off { fill: #0e0e05; filter: url(#recess); }
+  /* Lit segments emit amber glow */
+  .seg-on  { fill: #ccaa52; filter: drop-shadow(0 0 6px #cc8829); }
+  /* Unlit: dark recessed channel */
+  .seg-off { fill: #0a0a04; }
 
   /* overflow visible still needed so per-polygon glow bleeds outside viewBox */
   .digit-svg { overflow: visible; }
@@ -489,12 +483,12 @@
   body[data-mode="late"] #clock-display .colon-sep,
   body[data-mode="late"] #ampm-indicator { opacity: 0.12; }
 
-  body[data-band="amber"] .seg-on { fill: #e0b040; filter: drop-shadow(0 0 3px #e0b040) drop-shadow(0 0 10px #cc8829); }
+  body[data-band="amber"] .seg-on { fill: #e0b040; filter: drop-shadow(0 0 6px #cc8829); }
   body[data-band="amber"] .colon-dot { background: #e0b040; }
-  body[data-band="orange"] .seg-on { fill: #ff7a2a; filter: drop-shadow(0 0 3px #ff7a2a) drop-shadow(0 0 12px #ff4a00); }
+  body[data-band="orange"] .seg-on { fill: #ff7a2a; filter: drop-shadow(0 0 6px #ff4a00); }
   body[data-band="orange"] .colon-dot { background: #ff7a2a; }
   body[data-band="orange"] #ampm-indicator { color: #ff7a2a; }
-  body[data-band="red"] .seg-on { fill: #ff2a2a; filter: drop-shadow(0 0 4px #ff2a2a) drop-shadow(0 0 14px #ff0000); }
+  body[data-band="red"] .seg-on { fill: #ff2a2a; filter: drop-shadow(0 0 6px #ff0000); }
   body[data-band="red"] .colon-dot { background: #ff2a2a; }
   body[data-band="red"] #ampm-indicator { color: #ff2a2a; }
   body[data-band="red"] #status-line { color: #ff6a6a; }
@@ -819,24 +813,8 @@ function makeSvgDigit(w, h, segs) {
 
   const midY = h / 2;
 
-  const hasLit = segs.some(s => s === 1);
-
-  const defs = `<defs>
-    <filter id="recess" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
-      <feFlood flood-color="#000000" flood-opacity="1" result="black"/>
-      <feComposite in="black" in2="SourceGraphic" operator="in" result="fill"/>
-      <feGaussianBlur in="fill" stdDeviation="1.2" result="blur"/>
-      <feOffset in="blur" dx="1" dy="1.5" result="shadow"/>
-      <feBlend in="SourceGraphic" in2="shadow" mode="multiply" result="shaded"/>
-      <feComponentTransfer in="shaded">
-        <feFuncA type="linear" slope="0.28"/>
-      </feComponentTransfer>
-    </filter>
-  </defs>`;
-
   const svg = [
     `<svg class="digit-svg" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg" style="overflow:visible">`,
-    defs,
     hbar(th/2, 0),                          // a — top
     vbar(w - tw/2, th/2, midY, 1),          // b — top-right
     vbar(w - tw/2, midY, h - th/2, 2),      // c — bot-right
@@ -850,6 +828,9 @@ function makeSvgDigit(w, h, segs) {
 }
 
 function renderDigit(el, num) {
+  const key = String(num);
+  if (el.dataset.digit === key) return;
+  el.dataset.digit = key;
   const isLg = el.classList.contains('digit-lg');
   const w = isLg ? 178 : 124;
   const h = isLg ? 288 : 204;
@@ -1052,6 +1033,20 @@ function showRemainDigits(ms) {
   document.getElementById('ampm-indicator').textContent = 'LEFT';
 }
 
+let clockTimer = null;
+let clockTickMode = null;
+
+function tickIntervalFor(mode) {
+  return (mode === 'countdown' || mode === 'late') ? 250 : 1000;
+}
+
+function ensureClockTimer(mode) {
+  if (mode === clockTickMode && clockTimer) return;
+  if (clockTimer) clearInterval(clockTimer);
+  clockTickMode = mode;
+  clockTimer = setInterval(tickClock, tickIntervalFor(mode));
+}
+
 function tickClock() {
   const n = now();
   const state = morningState(n);
@@ -1059,6 +1054,7 @@ function tickClock() {
   const dateBit = DAYS[n.getDay()] + ' ' + n.getDate() + ' ' + MONTHS[n.getMonth()];
 
   document.body.dataset.mode = state.mode;
+  ensureClockTimer(state.mode);
 
   if (state.mode === 'clock') {
     document.body.dataset.band = 'plenty';
@@ -1100,7 +1096,6 @@ function startPreview(msLeft) {
 
 try { localStorage.removeItem('morning-board-schedule'); } catch (e) {}
 tickClock();
-setInterval(tickClock, 250);
 fetchSchedule();
 setInterval(fetchSchedule, 60 * 1000);
 document.addEventListener('visibilitychange', function () {
