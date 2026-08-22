@@ -879,9 +879,44 @@ let preview = null; // { sim: number, wall: number } | null
 
 function pad2(n) { return String(n).padStart(2,'0'); }
 
+function normalizeHm(hm) {
+  if (!hm) return '';
+  const s = String(hm).trim();
+  if (!s) return '';
+  if (/^\d{1,2}:\d{2}$/.test(s)) {
+    const parts = s.split(':').map(Number);
+    const h = parts[0];
+    const m = parts[1];
+    if (h >= 0 && h < 24 && m >= 0 && m < 60) return pad2(h) + ':' + pad2(m);
+    return '';
+  }
+  const digits = s.replace(/\D/g, '');
+  if (digits.length === 3 || digits.length === 4) {
+    const padded = digits.padStart(4, '0');
+    const h = Number(padded.slice(0, 2));
+    const m = Number(padded.slice(2));
+    if (h >= 0 && h < 24 && m >= 0 && m < 60) return pad2(h) + ':' + pad2(m);
+  }
+  return '';
+}
+
 function parseHM(hm) {
-  const [h, m] = String(hm).split(':').map(Number);
+  const norm = normalizeHm(hm);
+  const [h, m] = norm.split(':').map(Number);
   return { h, m };
+}
+
+function previewReferenceLeaveHm(d) {
+  return leaveByFor(d) || schedule.days.friday.leaveBy;
+}
+
+function previewDayConfig(d) {
+  const ref = schedule.days.friday;
+  return {
+    enabled: true,
+    alarm: ref.alarm,
+    leaveBy: previewReferenceLeaveHm(d)
+  };
 }
 
 function todayAt(hm, base) {
@@ -942,7 +977,6 @@ function fetchSchedule() {
       setScheduleStatus('Loaded from GitHub. School mornings here: Mon, Thu, Fri.');
       if (document.getElementById('sheetBg').classList.contains('open')) {
         buildWeekRows();
-        document.getElementById('leaveInput').value = leaveByFor(now()) || '07:40';
       }
       tickClock();
     });
@@ -956,7 +990,10 @@ function getTodayOverride(d) {
     const raw = localStorage.getItem(STORAGE_TODAY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (parsed && parsed.date === dateStamp(d) && parsed.leaveBy) return parsed.leaveBy;
+    if (parsed && parsed.date === dateStamp(d) && parsed.leaveBy) {
+      const norm = normalizeHm(parsed.leaveBy);
+      return norm || null;
+    }
   } catch (e) {}
   return null;
 }
@@ -994,8 +1031,8 @@ function morningOver(n, downstairs) {
 
 function morningState(n) {
   const key = JS_TO_KEY[n.getDay()];
-  const day = schedule.days[key];
-  const leaveHm = leaveByFor(n);
+  const day = preview ? previewDayConfig(n) : schedule.days[key];
+  const leaveHm = preview ? previewReferenceLeaveHm(n) : leaveByFor(n);
 
   if (!day || !day.enabled || !day.alarm || !leaveHm) {
     return { mode: 'clock' };
@@ -1087,7 +1124,7 @@ function remainingLate(ms) {
 
 function startPreview(msLeft) {
   const wall = new Date();
-  const leaveHm = leaveByFor(wall) || schedule.days.friday.leaveBy;
+  const leaveHm = previewReferenceLeaveHm(wall);
   const down = todayAt(downstairsHm(leaveHm), wall);
   preview = { sim: down.getTime() - msLeft, wall: Date.now() };
   document.getElementById('modeHint').textContent = 'Preview running. Back to live clock when done.';
@@ -1109,6 +1146,20 @@ const weekRows = document.getElementById('weekRows');
 const sheetBg = document.getElementById('sheetBg');
 const leaveInput = document.getElementById('leaveInput');
 
+function populateLeaveInput(d) {
+  const over = getTodayOverride(d);
+  if (over) {
+    leaveInput.value = over;
+    return;
+  }
+  const day = schedule.days[JS_TO_KEY[d.getDay()]];
+  if (day && day.enabled && day.leaveBy) {
+    leaveInput.value = day.leaveBy;
+    return;
+  }
+  leaveInput.value = '';
+}
+
 function buildWeekRows() {
   weekRows.innerHTML = '';
   WEEK_ORDER.forEach(function (key) {
@@ -1128,21 +1179,21 @@ function buildWeekRows() {
 
 document.getElementById('gear').addEventListener('click', function () {
   buildWeekRows();
-  const n = now();
-  leaveInput.value = leaveByFor(n) || '07:45';
+  populateLeaveInput(now());
   sheetBg.classList.add('open');
 });
 sheetBg.addEventListener('click', function () { sheetBg.classList.remove('open'); });
 document.getElementById('closeSheet').addEventListener('click', function () { sheetBg.classList.remove('open'); });
 document.getElementById('applyLeave').addEventListener('click', function () {
-  if (!leaveInput.value) return;
-  localStorage.setItem(STORAGE_TODAY, JSON.stringify({ date: dateStamp(new Date()), leaveBy: leaveInput.value }));
+  const leaveBy = normalizeHm(leaveInput.value);
+  if (!leaveBy) return;
+  localStorage.setItem(STORAGE_TODAY, JSON.stringify({ date: dateStamp(new Date()), leaveBy: leaveBy }));
   sheetBg.classList.remove('open');
   tickClock();
 });
 document.getElementById('resetLeave').addEventListener('click', function () {
   localStorage.removeItem(STORAGE_TODAY);
-  leaveInput.value = leaveByFor(now()) || '07:45';
+  populateLeaveInput(now());
   tickClock();
 });
 document.getElementById('jumpFive').addEventListener('click', function () {
