@@ -1314,20 +1314,21 @@ const TIME_PAD_LABELS = {
 let timePadTarget = null;
 let timePadDigits = '';
 let timePadReplace = false;
+let timePadWide = false;
 
 function digitsFromHm(value) {
   return String(value || '').replace(/\D/g, '').slice(0, 4);
 }
 
-function displayFromDigits(digits) {
+function displayFromDigits(digits, wide) {
   if (!digits) return '';
   if (digits.length <= 2) return digits;
-  if (digits.length === 3) return digits.charAt(0) + ':' + digits.slice(1);
+  if (digits.length === 3 && !wide) return digits.charAt(0) + ':' + digits.slice(1);
   return digits.slice(0, 2) + ':' + digits.slice(2);
 }
 
 function paintTimePad() {
-  const shown = displayFromDigits(timePadDigits);
+  const shown = displayFromDigits(timePadDigits, timePadWide);
   if (timePadTarget) timePadTarget.value = shown;
   timePadPreview.textContent = shown || '--:--';
 }
@@ -1335,6 +1336,8 @@ function paintTimePad() {
 function closeTimePad() {
   timePadTarget = null;
   timePadDigits = '';
+  timePadReplace = false;
+  timePadWide = false;
   timePad.classList.add('hidden');
   leaveInput.classList.remove('active');
   oneOffInput.classList.remove('active');
@@ -1343,6 +1346,7 @@ function closeTimePad() {
 function openTimePad(input) {
   timePadTarget = input;
   timePadDigits = digitsFromHm(input.value);
+  timePadWide = timePadDigits.length >= 4;
   timePadReplace = true;
   timePadLabel.textContent = TIME_PAD_LABELS[input.id] || 'Number pad';
   leaveInput.classList.toggle('active', input === leaveInput);
@@ -1373,6 +1377,7 @@ function handleTimePadKey(key) {
     }
     if (timePadDigits.length >= 4) return;
     timePadDigits += key;
+    if (timePadDigits.length >= 4) timePadWide = true;
     paintTimePad();
     return;
   }
@@ -1385,6 +1390,7 @@ function handleTimePadKey(key) {
   if (key === 'back') {
     timePadReplace = false;
     timePadDigits = timePadDigits.slice(0, -1);
+    if (timePadDigits.length <= 2) timePadWide = false;
     paintTimePad();
     return;
   }
@@ -1472,6 +1478,8 @@ document.getElementById('resetLeave').addEventListener('click', function () {
   populateLeaveInput(now());
   if (timePadTarget === leaveInput) {
     timePadDigits = digitsFromHm(leaveInput.value);
+    timePadWide = timePadDigits.length >= 4;
+    timePadReplace = true;
     paintTimePad();
   }
   tickClock();
@@ -1496,6 +1504,8 @@ document.getElementById('clearOneOff').addEventListener('click', function () {
   populateOneOff(new Date());
   if (timePadTarget === oneOffInput) {
     timePadDigits = digitsFromHm(oneOffInput.value);
+    timePadWide = timePadDigits.length >= 4;
+    timePadReplace = true;
     paintTimePad();
   }
   tickClock();
