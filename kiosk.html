@@ -600,16 +600,74 @@
     text-transform: uppercase;
   }
 
-  input[type="time"] {
+  input.time-field {
     width: 100%;
-    min-height: 46px;
+    min-height: 56px;
     border: 1px solid rgba(51,255,102,0.25);
     border-radius: 8px;
     background: #0a0c08;
     color: #ffcc66;
     font-family: inherit;
-    font-size: 1.2rem;
-    padding: 0 0.5rem;
+    font-size: 1.45rem;
+    letter-spacing: 0.08em;
+    padding: 0 0.65rem;
+    caret-color: transparent;
+    cursor: pointer;
+  }
+
+  input.time-field.active {
+    border-color: #ccaa52;
+    box-shadow: 0 0 0 2px rgba(204,170,82,0.35);
+  }
+
+  .time-pad {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    margin: 0.85rem -1.2rem calc(-1.2rem);
+    padding: 0.7rem 1.2rem calc(0.75rem + env(safe-area-inset-bottom));
+    background: #0c1008;
+    border-top: 1px solid rgba(51,255,102,0.28);
+  }
+
+  .time-pad-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.6rem;
+    margin-bottom: 0.45rem;
+    color: rgba(51,255,102,0.55);
+    letter-spacing: 0.1em;
+    font-size: 1.05rem;
+    text-transform: uppercase;
+  }
+
+  .time-pad-preview {
+    color: #ffcc66;
+    font-size: 1.45rem;
+    letter-spacing: 0.14em;
+  }
+
+  .time-pad-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.45rem;
+  }
+
+  .sheet .time-pad button {
+    flex: none;
+    width: 100%;
+    min-height: 58px;
+    font-size: 1.55rem;
+    letter-spacing: 0.06em;
+    padding: 0.35rem 0.4rem;
+  }
+
+  .sheet .time-pad .time-pad-done {
+    grid-column: 1 / -1;
+    background: #ccaa52;
+    color: #0a0a00;
+    border-color: #ccaa52;
   }
 
   .week-head, .day-row {
@@ -738,16 +796,16 @@
     <h3>TODAY ONLY</h3>
     <p class="hint" id="modeHint">On-the-road override is this calendar date only. It does not change GitHub.</p>
     <label for="leaveInput">Today’s on-the-road time</label>
-        <input id="leaveInput" type="time" value="07:40">
+    <input id="leaveInput" class="time-field" type="text" inputmode="none" readonly autocomplete="off" spellcheck="false" placeholder="HH:MM" value="07:40">
     <div class="row">
       <button type="button" id="applyLeave">Use this road time today</button>
       <button type="button" id="resetLeave">Clear today’s override</button>
     </div>
 
     <h3>ONE-OFF LEAVE</h3>
-    <p class="hint">Punch a leave-by for today only and start a countdown now. Not a new weekday. Does not change GitHub or today’s school road time. Off days and Saturday shopping are the point.</p>
+    <p class="hint">Punch a leave-by for today only and start a countdown now. Tap the time and use the pad — Windows will not pop a keyboard. Not a new weekday. Does not change GitHub or today’s school road time. Off days and Saturday shopping are the point.</p>
     <label for="oneOffInput">One-off leave-by today</label>
-    <input id="oneOffInput" type="time">
+    <input id="oneOffInput" class="time-field" type="text" inputmode="none" readonly autocomplete="off" spellcheck="false" placeholder="HH:MM">
     <div class="row">
       <button type="button" id="startOneOff">Start one-off countdown</button>
       <button type="button" id="clearOneOff">Clear one-off</button>
@@ -763,6 +821,28 @@
     </div>
     <div class="row">
       <button type="button" id="closeSheet">Close</button>
+    </div>
+
+    <div id="timePad" class="time-pad hidden">
+      <div class="time-pad-head">
+        <span id="timePadLabel">Number pad</span>
+        <span id="timePadPreview" class="time-pad-preview">--:--</span>
+      </div>
+      <div class="time-pad-grid" id="timePadGrid">
+        <button type="button" data-key="1">1</button>
+        <button type="button" data-key="2">2</button>
+        <button type="button" data-key="3">3</button>
+        <button type="button" data-key="4">4</button>
+        <button type="button" data-key="5">5</button>
+        <button type="button" data-key="6">6</button>
+        <button type="button" data-key="7">7</button>
+        <button type="button" data-key="8">8</button>
+        <button type="button" data-key="9">9</button>
+        <button type="button" data-key="back" aria-label="Backspace">⌫</button>
+        <button type="button" data-key="0">0</button>
+        <button type="button" data-key="colon">:</button>
+        <button type="button" data-key="done" class="time-pad-done">Done</button>
+      </div>
     </div>
   </div>
 </div>
@@ -1224,6 +1304,105 @@ const weekRows = document.getElementById('weekRows');
 const sheetBg = document.getElementById('sheetBg');
 const leaveInput = document.getElementById('leaveInput');
 const oneOffInput = document.getElementById('oneOffInput');
+const timePad = document.getElementById('timePad');
+const timePadLabel = document.getElementById('timePadLabel');
+const timePadPreview = document.getElementById('timePadPreview');
+const TIME_PAD_LABELS = {
+  leaveInput: 'Today road time',
+  oneOffInput: 'One-off leave-by'
+};
+let timePadTarget = null;
+let timePadDigits = '';
+let timePadReplace = false;
+
+function digitsFromHm(value) {
+  return String(value || '').replace(/\D/g, '').slice(0, 4);
+}
+
+function displayFromDigits(digits) {
+  if (!digits) return '';
+  if (digits.length <= 2) return digits;
+  if (digits.length === 3) return digits.charAt(0) + ':' + digits.slice(1);
+  return digits.slice(0, 2) + ':' + digits.slice(2);
+}
+
+function paintTimePad() {
+  const shown = displayFromDigits(timePadDigits);
+  if (timePadTarget) timePadTarget.value = shown;
+  timePadPreview.textContent = shown || '--:--';
+}
+
+function closeTimePad() {
+  timePadTarget = null;
+  timePadDigits = '';
+  timePad.classList.add('hidden');
+  leaveInput.classList.remove('active');
+  oneOffInput.classList.remove('active');
+}
+
+function openTimePad(input) {
+  timePadTarget = input;
+  timePadDigits = digitsFromHm(input.value);
+  timePadReplace = true;
+  timePadLabel.textContent = TIME_PAD_LABELS[input.id] || 'Number pad';
+  leaveInput.classList.toggle('active', input === leaveInput);
+  oneOffInput.classList.toggle('active', input === oneOffInput);
+  timePad.classList.remove('hidden');
+  paintTimePad();
+  input.scrollIntoView({ block: 'nearest' });
+  timePad.scrollIntoView({ block: 'nearest' });
+}
+
+function bindTimeField(input) {
+  input.addEventListener('pointerdown', function (e) {
+    e.preventDefault();
+    openTimePad(input);
+  });
+  input.addEventListener('focus', function () {
+    input.blur();
+    openTimePad(input);
+  });
+}
+
+function handleTimePadKey(key) {
+  if (!timePadTarget) return;
+  if (key >= '0' && key <= '9') {
+    if (timePadReplace) {
+      timePadDigits = '';
+      timePadReplace = false;
+    }
+    if (timePadDigits.length >= 4) return;
+    timePadDigits += key;
+    paintTimePad();
+    return;
+  }
+  if (key === 'colon') {
+    timePadReplace = false;
+    if (timePadDigits.length === 1) timePadDigits = '0' + timePadDigits;
+    paintTimePad();
+    return;
+  }
+  if (key === 'back') {
+    timePadReplace = false;
+    timePadDigits = timePadDigits.slice(0, -1);
+    paintTimePad();
+    return;
+  }
+  if (key === 'done') {
+    const norm = normalizeHm(timePadTarget.value);
+    if (norm) timePadTarget.value = norm;
+    closeTimePad();
+  }
+}
+
+bindTimeField(leaveInput);
+bindTimeField(oneOffInput);
+document.getElementById('timePadGrid').addEventListener('pointerdown', function (e) {
+  const btn = e.target.closest('button[data-key]');
+  if (!btn) return;
+  e.preventDefault();
+  handleTimePadKey(btn.getAttribute('data-key'));
+});
 
 function oneOffStatusText(d) {
   const rec = getActiveOneOff(d);
@@ -1272,20 +1451,29 @@ document.getElementById('gear').addEventListener('click', function () {
   buildWeekRows();
   populateLeaveInput(now());
   populateOneOff(new Date());
+  closeTimePad();
   sheetBg.classList.add('open');
 });
-sheetBg.addEventListener('click', function () { sheetBg.classList.remove('open'); });
-document.getElementById('closeSheet').addEventListener('click', function () { sheetBg.classList.remove('open'); });
+function closeSheet() {
+  closeTimePad();
+  sheetBg.classList.remove('open');
+}
+sheetBg.addEventListener('click', function () { closeSheet(); });
+document.getElementById('closeSheet').addEventListener('click', function () { closeSheet(); });
 document.getElementById('applyLeave').addEventListener('click', function () {
   const leaveBy = normalizeHm(leaveInput.value);
   if (!leaveBy) return;
   localStorage.setItem(STORAGE_TODAY, JSON.stringify({ date: dateStamp(new Date()), leaveBy: leaveBy }));
-  sheetBg.classList.remove('open');
+  closeSheet();
   tickClock();
 });
 document.getElementById('resetLeave').addEventListener('click', function () {
   localStorage.removeItem(STORAGE_TODAY);
   populateLeaveInput(now());
+  if (timePadTarget === leaveInput) {
+    timePadDigits = digitsFromHm(leaveInput.value);
+    paintTimePad();
+  }
   tickClock();
 });
 document.getElementById('startOneOff').addEventListener('click', function () {
@@ -1300,26 +1488,30 @@ document.getElementById('startOneOff').addEventListener('click', function () {
   preview = null;
   document.getElementById('modeHint').textContent = 'On-the-road override is this calendar date only. It does not change GitHub.';
   writeOneOff(leaveBy);
-  sheetBg.classList.remove('open');
+  closeSheet();
   tickClock();
 });
 document.getElementById('clearOneOff').addEventListener('click', function () {
   clearOneOff();
   populateOneOff(new Date());
+  if (timePadTarget === oneOffInput) {
+    timePadDigits = digitsFromHm(oneOffInput.value);
+    paintTimePad();
+  }
   tickClock();
 });
 document.getElementById('jumpFive').addEventListener('click', function () {
   startPreview(5 * 60 * 1000);
-  sheetBg.classList.remove('open');
+  closeSheet();
 });
 document.getElementById('jumpZero').addEventListener('click', function () {
   startPreview(0);
-  sheetBg.classList.remove('open');
+  closeSheet();
 });
 document.getElementById('clearPreview').addEventListener('click', function () {
   preview = null;
   document.getElementById('modeHint').textContent = 'On-the-road override is this calendar date only. It does not change GitHub.';
-  sheetBg.classList.remove('open');
+  closeSheet();
   tickClock();
 });
 
