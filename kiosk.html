@@ -744,6 +744,16 @@
       <button type="button" id="resetLeave">Clear today’s override</button>
     </div>
 
+    <h3>ONE-OFF LEAVE</h3>
+    <p class="hint">Punch a leave-by for today only and start a countdown now. Not a new weekday. Does not change GitHub or today’s school road time. Off days and Saturday shopping are the point.</p>
+    <label for="oneOffInput">One-off leave-by today</label>
+    <input id="oneOffInput" type="time">
+    <div class="row">
+      <button type="button" id="startOneOff">Start one-off countdown</button>
+      <button type="button" id="clearOneOff">Clear one-off</button>
+    </div>
+    <p class="hint" id="oneOffStatus">No one-off running.</p>
+
     <h3>PREVIEW</h3>
     <p class="hint">Does not change the real clock. Use this to see the countdown in the afternoon.</p>
     <div class="row">
@@ -859,6 +869,8 @@ const SHORT = {
   friday:'FRI', saturday:'SAT', sunday:'SUN'
 };
 const STORAGE_TODAY = 'morning-board-today';
+const STORAGE_ONEOFF = 'morning-board-oneoff';
+let oneOffMem = null;
 
 const DEFAULT_SCHEDULE = {
   days: {
@@ -998,6 +1010,59 @@ function getTodayOverride(d) {
   return null;
 }
 
+function parseOneOffRaw(raw) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || !parsed.date || !parsed.leaveBy) return null;
+    const norm = normalizeHm(parsed.leaveBy);
+    if (!norm) return null;
+    return { date: parsed.date, leaveBy: norm };
+  } catch (e) {
+    return null;
+  }
+}
+
+function readOneOffRecord() {
+  if (oneOffMem && oneOffMem.date && oneOffMem.leaveBy) return oneOffMem;
+  let rec = null;
+  try { rec = parseOneOffRaw(localStorage.getItem(STORAGE_ONEOFF)); } catch (e) {}
+  if (!rec) {
+    try { rec = parseOneOffRaw(sessionStorage.getItem(STORAGE_ONEOFF)); } catch (e) {}
+  }
+  if (rec) oneOffMem = rec;
+  return rec;
+}
+
+function writeOneOff(leaveBy) {
+  const rec = { date: dateStamp(new Date()), leaveBy: leaveBy };
+  oneOffMem = rec;
+  const raw = JSON.stringify(rec);
+  try { localStorage.setItem(STORAGE_ONEOFF, raw); } catch (e) {}
+  try { sessionStorage.setItem(STORAGE_ONEOFF, raw); } catch (e) {}
+}
+
+function clearOneOff() {
+  oneOffMem = null;
+  try { localStorage.removeItem(STORAGE_ONEOFF); } catch (e) {}
+  try { sessionStorage.removeItem(STORAGE_ONEOFF); } catch (e) {}
+}
+
+function getActiveOneOff(d) {
+  const rec = readOneOffRecord();
+  if (!rec) return null;
+  if (rec.date !== dateStamp(d)) {
+    clearOneOff();
+    return null;
+  }
+  const road = todayAt(rec.leaveBy, d);
+  if (d.getTime() >= road.getTime() + LATE_HOLD_MS) {
+    clearOneOff();
+    return null;
+  }
+  return rec;
+}
+
 function now() {
   if (!preview) return new Date();
   return new Date(preview.sim + (Date.now() - preview.wall));
@@ -1033,6 +1098,17 @@ function morningState(n) {
   const key = JS_TO_KEY[n.getDay()];
   const day = preview ? previewDayConfig(n) : schedule.days[key];
   const leaveHm = preview ? previewReferenceLeaveHm(n) : leaveByFor(n);
+
+  if (!preview) {
+    const oneOff = getActiveOneOff(n);
+    if (oneOff) {
+      const leaveOff = oneOff.leaveBy;
+      const road = todayAt(leaveOff, n);
+      const ms = road.getTime() - n.getTime();
+      if (ms <= 0) return { mode: 'late', ms: ms, downHm: leaveOff, leaveHm: leaveOff, oneOff: true };
+      return { mode: 'countdown', ms: ms, downHm: leaveOff, leaveHm: leaveOff, oneOff: true };
+    }
+  }
 
   if (!day || !day.enabled || !day.alarm || !leaveHm) {
     return { mode: 'clock' };
@@ -1092,6 +1168,7 @@ function tickClock() {
 
   document.body.dataset.mode = state.mode;
   ensureClockTimer(state.mode);
+  document.getElementById('leave-now').textContent = state.oneOff ? 'LEAVE NOW' : 'DOWNSTAIRS NOW';
 
   if (state.mode === 'clock') {
     document.body.dataset.band = 'plenty';
@@ -1102,10 +1179,11 @@ function tickClock() {
 
   document.body.dataset.band = bandFor(state.ms);
   const downLabel = formatClock(state.downHm);
+  const byLabel = state.oneOff ? 'LEAVE BY' : 'DOWNSTAIRS BY';
 
   if (state.mode === 'countdown') {
     showRemainDigits(state.ms);
-    status.innerHTML = 'DOWNSTAIRS BY <span class="amber">' + downLabel + '</span>';
+    status.innerHTML = byLabel + ' <span class="amber">' + downLabel + '</span>';
     return;
   }
 
@@ -1145,6 +1223,19 @@ document.addEventListener('visibilitychange', function () {
 const weekRows = document.getElementById('weekRows');
 const sheetBg = document.getElementById('sheetBg');
 const leaveInput = document.getElementById('leaveInput');
+const oneOffInput = document.getElementById('oneOffInput');
+
+function oneOffStatusText(d) {
+  const rec = getActiveOneOff(d);
+  if (!rec) return 'No one-off running.';
+  return 'One-off running: leave by ' + formatClock(rec.leaveBy) + ' today.';
+}
+
+function populateOneOff(d) {
+  const rec = getActiveOneOff(d);
+  oneOffInput.value = rec ? rec.leaveBy : '';
+  document.getElementById('oneOffStatus').textContent = oneOffStatusText(d);
+}
 
 function populateLeaveInput(d) {
   const over = getTodayOverride(d);
@@ -1180,6 +1271,7 @@ function buildWeekRows() {
 document.getElementById('gear').addEventListener('click', function () {
   buildWeekRows();
   populateLeaveInput(now());
+  populateOneOff(new Date());
   sheetBg.classList.add('open');
 });
 sheetBg.addEventListener('click', function () { sheetBg.classList.remove('open'); });
@@ -1194,6 +1286,26 @@ document.getElementById('applyLeave').addEventListener('click', function () {
 document.getElementById('resetLeave').addEventListener('click', function () {
   localStorage.removeItem(STORAGE_TODAY);
   populateLeaveInput(now());
+  tickClock();
+});
+document.getElementById('startOneOff').addEventListener('click', function () {
+  const leaveBy = normalizeHm(oneOffInput.value);
+  if (!leaveBy) return;
+  const wall = new Date();
+  const road = todayAt(leaveBy, wall);
+  if (wall.getTime() >= road.getTime() + LATE_HOLD_MS) {
+    document.getElementById('oneOffStatus').textContent = 'That time is already past today. Pick a later leave-by.';
+    return;
+  }
+  preview = null;
+  document.getElementById('modeHint').textContent = 'On-the-road override is this calendar date only. It does not change GitHub.';
+  writeOneOff(leaveBy);
+  sheetBg.classList.remove('open');
+  tickClock();
+});
+document.getElementById('clearOneOff').addEventListener('click', function () {
+  clearOneOff();
+  populateOneOff(new Date());
   tickClock();
 });
 document.getElementById('jumpFive').addEventListener('click', function () {
