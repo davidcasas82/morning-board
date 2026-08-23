@@ -998,6 +998,24 @@ function parseHM(hm) {
   return { h, m };
 }
 
+// One-off leave-by is the next upcoming clock today (household / America/Los_Angeles).
+// Hours 1–11 with no AM/PM: morning if that time is still ahead, else afternoon if
+// that time is still ahead, else afternoon (already passed — do not roll to tomorrow).
+// 12:xx is noon, never midnight. Midnight is only 00:xx.
+function resolveOneOffHm(hm, d) {
+  const norm = normalizeHm(hm);
+  if (!norm) return '';
+  const { h, m } = parseHM(norm);
+  if (h === 0 || h >= 12) return norm;
+  const mm = pad2(m);
+  const amHm = pad2(h) + ':' + mm;
+  const pmHm = pad2(h + 12) + ':' + mm;
+  const nowMs = d.getTime();
+  if (nowMs < todayAt(amHm, d).getTime()) return amHm;
+  if (nowMs < todayAt(pmHm, d).getTime()) return pmHm;
+  return pmHm;
+}
+
 function previewReferenceLeaveHm(d) {
   return leaveByFor(d) || schedule.days.friday.leaveBy;
 }
@@ -1135,7 +1153,16 @@ function getActiveOneOff(d) {
     clearOneOff();
     return null;
   }
-  const road = todayAt(rec.leaveBy, d);
+  const resolved = resolveOneOffHm(rec.leaveBy, d);
+  if (!resolved) {
+    clearOneOff();
+    return null;
+  }
+  if (resolved !== rec.leaveBy) {
+    writeOneOff(resolved);
+    rec.leaveBy = resolved;
+  }
+  const road = todayAt(resolved, d);
   if (d.getTime() >= road.getTime() + LATE_HOLD_MS) {
     clearOneOff();
     return null;
@@ -1182,6 +1209,7 @@ function morningState(n) {
   if (!preview) {
     const oneOff = getActiveOneOff(n);
     if (oneOff) {
+      // Absolute punched clock — no weekday downstairs / breakfast buffer.
       const leaveOff = oneOff.leaveBy;
       const road = todayAt(leaveOff, n);
       const ms = road.getTime() - n.getTime();
@@ -1485,9 +1513,10 @@ document.getElementById('resetLeave').addEventListener('click', function () {
   tickClock();
 });
 document.getElementById('startOneOff').addEventListener('click', function () {
-  const leaveBy = normalizeHm(oneOffInput.value);
-  if (!leaveBy) return;
   const wall = new Date();
+  const leaveBy = resolveOneOffHm(oneOffInput.value, wall);
+  if (!leaveBy) return;
+  oneOffInput.value = leaveBy;
   const road = todayAt(leaveBy, wall);
   if (wall.getTime() >= road.getTime() + LATE_HOLD_MS) {
     document.getElementById('oneOffStatus').textContent = 'That time is already past today. Pick a later leave-by.';
