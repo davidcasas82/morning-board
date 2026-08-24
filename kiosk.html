@@ -1559,7 +1559,73 @@ document.getElementById('clearPreview').addEventListener('click', function () {
    All icons: viewBox 0 0 100 100, stroke=#33ff66, fill=none, strokeWidth~4-5
    ================================================================ */
 
-const S = (paths) => `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;overflow:visible" fill="none" stroke="#33ff66" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+const S = (paths, label) => `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;overflow:visible" fill="none" stroke="#33ff66" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"${label ? ` role="img" aria-label="${label}"` : ''}>${paths}</svg>`;
+
+/* Synodic month from a known new moon (2000-01-06 18:14 UTC). No extra API. */
+const MOON_SYNODIC_DAYS = 29.530588853;
+const MOON_NEW_EPOCH_MS = Date.UTC(2000, 0, 6, 18, 14, 0);
+const MOON_PHASE_NAMES = [
+  'New moon', 'Waxing crescent', 'First quarter', 'Waxing gibbous',
+  'Full moon', 'Waning gibbous', 'Last quarter', 'Waning crescent'
+];
+
+function moonPhaseIndex(date = new Date()) {
+  const days = (date.getTime() - MOON_NEW_EPOCH_MS) / 86400000;
+  const age = ((days % MOON_SYNODIC_DAYS) + MOON_SYNODIC_DAYS) % MOON_SYNODIC_DAYS;
+  return Math.round((age / MOON_SYNODIC_DAYS) * 8) % 8;
+}
+
+let _moonMaskSeq = 0;
+
+function moonDisk(cx, cy, r, phaseIdx, strokeW) {
+  const sw = strokeW || 2.5;
+  const outline = `<circle cx="${cx}" cy="${cy}" r="${r}" stroke-width="${sw}"/>`;
+  if (phaseIdx === 0) return outline;
+
+  const fill = 'fill="#33ff66" fill-opacity="0.38" stroke="none"';
+  if (phaseIdx === 4) {
+    return `${outline}<circle cx="${cx}" cy="${cy}" r="${r}" ${fill}/>`;
+  }
+
+  const id = `mp${++_moonMaskSeq}`;
+  let maskBody;
+  if (phaseIdx === 2) {
+    maskBody = `<rect x="${cx}" y="${cy - r}" width="${r}" height="${r * 2}" fill="white" stroke="none"/>`;
+  } else if (phaseIdx === 6) {
+    maskBody = `<rect x="${cx - r}" y="${cy - r}" width="${r}" height="${r * 2}" fill="white" stroke="none"/>`;
+  } else {
+    const waxing = phaseIdx === 1 || phaseIdx === 3;
+    const crescent = phaseIdx === 1 || phaseIdx === 7;
+    const dist = r * (crescent ? 0.52 : 1.62);
+    const ox = cx + (waxing ? -dist : dist);
+    maskBody = `<circle cx="${cx}" cy="${cy}" r="${r}" fill="white" stroke="none"/><circle cx="${ox}" cy="${cy}" r="${r}" fill="black" stroke="none"/>`;
+  }
+
+  const split = (phaseIdx === 2 || phaseIdx === 6)
+    ? `<line x1="${cx}" y1="${cy - r}" x2="${cx}" y2="${cy + r}"/>`
+    : '';
+
+  return `<defs><mask id="${id}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse">${maskBody}</mask></defs>${outline}<circle cx="${cx}" cy="${cy}" r="${r}" ${fill} mask="url(#${id})"/>${split}`;
+}
+
+const NIGHT_STARS = `
+  <line x1="16" y1="20" x2="16" y2="28"/>
+  <line x1="12" y1="24" x2="20" y2="24"/>
+  <line x1="82" y1="16" x2="82" y2="22"/>
+  <line x1="79" y1="19" x2="85" y2="19"/>
+  <line x1="88" y1="36" x2="88" y2="40"/>
+  <line x1="86" y1="38" x2="90" y2="38"/>
+`;
+
+const NIGHT_CLOUD = `<path d="M28 52 Q20 52 20 60 Q20 68 30 68 L72 68 Q82 68 82 59 Q82 50 72 50 Q70 38 58 38 Q46 38 44 49 Q36 48 28 52Z" stroke-width="2.5"/>`;
+
+function moonIcon(phaseIdx) {
+  return S(`${NIGHT_STARS}${moonDisk(50, 52, 30, phaseIdx, 2.5)}`, MOON_PHASE_NAMES[phaseIdx]);
+}
+
+function moonBehindClouds(phaseIdx) {
+  return S(`${moonDisk(34, 30, 16, phaseIdx, 2.5)}${NIGHT_CLOUD}`, `${MOON_PHASE_NAMES[phaseIdx]}, partly cloudy`);
+}
 
 const ICONS = {
   sun: S(`
@@ -1573,9 +1639,6 @@ const ICONS = {
     <line x1="79" y1="21" x2="72" y2="28"/>
     <line x1="28" y1="72" x2="21" y2="79"/>
   `),
-  moon: S(`
-    <path d="M55 15 A32 32 0 1 0 55 85 A22 22 0 1 1 55 15Z" stroke-width="2.5"/>
-  `),
   partlyCloudy: S(`
     <circle cx="38" cy="42" r="14" stroke-width="2.5"/>
     <line x1="38" y1="14" x2="38" y2="22"/>
@@ -1583,10 +1646,6 @@ const ICONS = {
     <line x1="17" y1="21" x2="23" y2="27"/>
     <line x1="59" y1="21" x2="53" y2="27"/>
     <path d="M28 58 Q20 58 20 66 Q20 74 30 74 L72 74 Q82 74 82 65 Q82 56 72 56 Q70 44 58 44 Q46 44 44 55 Q36 54 28 58Z" stroke-width="2.5"/>
-  `),
-  partlyCloudyNight: S(`
-    <path d="M36 18 A16 16 0 1 0 36 48 A11 11 0 1 1 36 18Z" stroke-width="2.5"/>
-    <path d="M28 52 Q20 52 20 60 Q20 68 30 68 L72 68 Q82 68 82 59 Q82 50 72 50 Q70 38 58 38 Q46 38 44 49 Q36 48 28 52Z" stroke-width="2.5"/>
   `),
   cloud: S(`
     <path d="M18 62 Q10 62 10 72 Q10 82 22 82 L78 82 Q90 82 90 72 Q90 62 78 62 Q76 46 60 46 Q46 46 42 58 Q30 56 18 62Z" stroke-width="2.5"/>
@@ -1674,13 +1733,16 @@ const WMO = {
   99: { icon: ICONS.storm,      desc:'STORM W/ HEAVY HAIL' },
 };
 
-function wmoInfo(code, isDay = true) {
+function wmoInfo(code, isDay = true, when = new Date()) {
   const info = WMO[code] || { icon: ICONS.unknown, desc:'UNKNOWN' };
-  if (!isDay) {
-    if (code === 0) return { icon: ICONS.moon, desc: 'CLEAR SKY' };
-    if (code === 1) return { icon: ICONS.moon, desc: 'MAINLY CLEAR' };
-    if (code === 2) return { icon: ICONS.partlyCloudyNight, desc: 'PARTLY CLOUDY' };
-  }
+  if (isDay) return info;
+
+  const phase = moonPhaseIndex(when);
+  // Moon stays in the glyph only when it would still be visible.
+  // Overcast / fog / rain / snow / storm use the same condition art as day.
+  if (code === 0) return { icon: moonIcon(phase), desc: 'CLEAR SKY' };
+  if (code === 1) return { icon: moonIcon(phase), desc: 'MAINLY CLEAR' };
+  if (code === 2) return { icon: moonBehindClouds(phase), desc: 'PARTLY CLOUDY' };
   return info;
 }
 
@@ -1737,7 +1799,8 @@ async function fetchWeather(lat, lon) {
                      : ' →';
 
     const isDay = cur.is_day === 1;
-    const info = wmoInfo(cur.weather_code, isDay);
+    const observedAt = cur.time ? new Date(cur.time) : new Date();
+    const info = wmoInfo(cur.weather_code, isDay, observedAt);
     const temp = Math.round(cur.temperature_2m);
     const feel = Math.round(cur.apparent_temperature);
     const wind = Math.round(cur.wind_speed_10m);
