@@ -942,6 +942,7 @@ function setDigits(ids, str) {
    ================================================================ */
 const DAYS   = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
 const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+const DOW = ['S','M','T','W','T','F','S'];
 const JS_TO_KEY = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
 const WEEK_ORDER = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
 const SHORT = {
@@ -951,6 +952,7 @@ const SHORT = {
 const STORAGE_TODAY = 'morning-board-today';
 const STORAGE_ONEOFF = 'morning-board-oneoff';
 let oneOffMem = null;
+let lastCalendarStamp = '';
 
 const DEFAULT_SCHEDULE = {
   days: {
@@ -1269,6 +1271,7 @@ function ensureClockTimer(mode) {
 }
 
 function tickClock() {
+  ensureCalendar();
   const n = now();
   const state = morningState(n);
   const status = document.getElementById('status-main');
@@ -1322,7 +1325,10 @@ tickClock();
 fetchSchedule();
 setInterval(fetchSchedule, 60 * 1000);
 document.addEventListener('visibilitychange', function () {
-  if (document.visibilityState === 'visible') fetchSchedule();
+  if (document.visibilityState === 'visible') {
+    fetchSchedule();
+    ensureCalendar();
+  }
 });
 
 /* ================================================================
@@ -1856,14 +1862,16 @@ async function fetchWeather(lat, lon) {
 
 /* ================================================================
    CALENDAR
+   Month grid uses the device local calendar date (household TZ is
+   America/Los_Angeles). Re-render when that date rolls — the clock
+   already ticks, but a leftover kiosk tab can sleep past midnight.
    ================================================================ */
-const DOW = ['S','M','T','W','T','F','S'];
-
 function renderCalendar() {
   const now   = new Date();
   const year  = now.getFullYear();
   const month = now.getMonth();
   const today = now.getDate();
+  lastCalendarStamp = dateStamp(now);
 
   const monthName = MONTHS[month];
   document.getElementById('cal-header').textContent = `${monthName} ${year}`;
@@ -1884,7 +1892,13 @@ function renderCalendar() {
   document.getElementById('cal-grid').innerHTML = html;
 }
 
+function ensureCalendar() {
+  if (dateStamp(new Date()) === lastCalendarStamp) return;
+  renderCalendar();
+}
+
 renderCalendar();
+setInterval(ensureCalendar, 60 * 1000);
 
 let _weatherLat = null, _weatherLon = null;
 
