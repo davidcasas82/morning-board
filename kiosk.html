@@ -1,19 +1,131 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="fallout">
 <head>
   <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-store">
 <title>Morning board</title>
-<link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+<script>
+/* Theme before first paint. ?theme= previews this load and does not save. */
+(function () {
+  var theme = 'fallout';
+  try {
+    var q = new URLSearchParams(location.search).get('theme');
+    if (q === 'slate' || q === 'fallout') theme = q;
+    else {
+      var saved = localStorage.getItem('morning-board-theme');
+      if (saved === 'slate' || saved === 'fallout') theme = saved;
+    }
+  } catch (e) {}
+  document.documentElement.setAttribute('data-theme', theme);
+})();
+</script>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500&family=VT323&display=swap" rel="stylesheet">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+  /* Fallout is the default. Slate only overrides these tokens. */
+  html {
+    --page-center: #1a1a0f;
+    --page-mid: #0d0d00;
+    --page-edge: #0a0a00;
+    --sheet: #10140c;
+    --numpad: #0c1008;
+    --field: #0a0c08;
+    --button: #1a2414;
+    --seg-off: #0a0a04;
+    --hairline: rgba(51,255,102,0.2);
+    --hairline-soft: rgba(51,255,102,0.15);
+    --hairline-strong: rgba(51,255,102,0.35);
+    --hairline-button: rgba(51,255,102,0.3);
+    --hairline-input: rgba(51,255,102,0.25);
+    --divider-glow: 0 0 6px rgba(51,255,102,0.15);
+    --panel-glow: 0 0 6px rgba(51,255,102,0.1);
+    --text: #33ff66;
+    --text-strong: #44dd66;
+    --text-secondary: rgba(51,255,102,0.5);
+    --text-hint: rgba(51,255,102,0.55);
+    --text-muted: rgba(51,255,102,0.35);
+    --text-faint: rgba(51,255,102,0.4);
+    --text-day: rgba(51,255,102,0.6);
+    --text-header: rgba(51,255,102,0.55);
+    --text-fc: rgba(51,255,102,0.45);
+    --digit: #ccaa52;
+    --emphasis: #ffcc66;
+    --ink: #0a0a00;
+    --font: 'VT323', monospace;
+    --seg-filter: drop-shadow(0 0 6px #cc8829);
+    --colon-shadow: 0 0 6px #cc8829, 0 0 14px #cc660044;
+    --digit-shadow: 0 0 8px #cc882966;
+    --text-shadow: 0 0 8px rgba(51,255,102,0.4);
+    --emphasis-shadow: 0 0 8px #ffaa3388;
+    --temp-shadow: 0 0 12px #ffaa3388, 0 0 28px #ff880033;
+    --today-shadow: 0 0 10px #cc882966;
+    --high-shadow: 0 0 6px #cc882955;
+    --detail-shadow: 0 0 8px #ffaa3366;
+    --active-ring: 0 0 0 2px rgba(204,170,82,0.35);
+    --icon-filter: drop-shadow(0 0 5px #33ff66cc) drop-shadow(0 0 16px #33ff6655);
+    --fc-filter: drop-shadow(0 0 3px #33ff6688);
+    --gear: rgba(51,255,102,0.28);
+    --arrow: rgba(204,170,82,0.6);
+    --barrel-radius: 40px / 30px;
+    --barrel-shadow: inset 0 0 120px rgba(0,0,0,0.9), inset 0 0 40px rgba(0,0,0,0.5);
+    --crt: 1;
+  }
+
+  html[data-theme="slate"] {
+    --page-center: #141416;
+    --page-mid: #070708;
+    --page-edge: #070708;
+    --sheet: #16161a;
+    --numpad: #16161a;
+    --field: #070708;
+    --button: #141416;
+    --seg-off: #222226;
+    --hairline: #3a3a42;
+    --hairline-soft: #3a3a42;
+    --hairline-strong: #3a3a42;
+    --hairline-button: #3a3a42;
+    --hairline-input: #3a3a42;
+    --divider-glow: none;
+    --panel-glow: none;
+    --text: #ececf0;
+    --text-strong: #ececf0;
+    --text-secondary: #c6c6cc;
+    --text-hint: #c6c6cc;
+    --text-muted: #a1a1aa;
+    --text-faint: #a1a1aa;
+    --text-day: #c6c6cc;
+    --text-header: #c6c6cc;
+    --text-fc: #a1a1aa;
+    --digit: #e8b86a;
+    --emphasis: #f2d2a1;
+    --ink: #141416;
+    --font: 'IBM Plex Sans', sans-serif;
+    --seg-filter: none;
+    --colon-shadow: none;
+    --digit-shadow: none;
+    --text-shadow: none;
+    --emphasis-shadow: none;
+    --temp-shadow: none;
+    --today-shadow: none;
+    --high-shadow: none;
+    --detail-shadow: none;
+    --active-ring: 0 0 0 2px #3a3a42;
+    --icon-filter: none;
+    --fc-filter: none;
+    --gear: #a1a1aa;
+    --arrow: #e8b86a;
+    --barrel-radius: 0;
+    --barrel-shadow: none;
+    --crt: 0;
+  }
+
   html, body {
     width: 100%; height: 100%;
-    background: radial-gradient(ellipse at center, #1a1a0f 0%, #0d0d00 55%, #0a0a00 100%);
-    font-family: 'VT323', monospace;
-    color: #33ff66;
+    background: radial-gradient(ellipse at center, var(--page-center) 0%, var(--page-mid) 55%, var(--page-edge) 100%);
+    font-family: var(--font);
+    color: var(--text);
     overflow: hidden;
     user-select: none;
     -webkit-user-select: none;
@@ -49,15 +161,18 @@
     z-index: 99;
   }
 
-  /* Barrel-wrap: curved CRT glass illusion */
+  html[data-theme="slate"] body::before,
+  html[data-theme="slate"] body::after {
+    display: none;
+  }
+
+  /* Barrel-wrap: curved CRT glass illusion (Fallout only) */
   #barrel-wrap {
     position: fixed;
     inset: 0;
     overflow: hidden;
-    border-radius: 40px / 30px;
-    box-shadow:
-      inset 0 0 120px rgba(0,0,0,0.9),
-      inset 0 0 40px  rgba(0,0,0,0.5);
+    border-radius: var(--barrel-radius);
+    box-shadow: var(--barrel-shadow);
   }
 
   #app {
@@ -82,10 +197,10 @@
   /* Vertical divider */
   #divider {
     width: 1px;
-    background: rgba(51,255,102,0.2);
+    background: var(--hairline);
     align-self: stretch;
     margin: 20px 0;
-    box-shadow: 0 0 6px rgba(51,255,102,0.15);
+    box-shadow: var(--divider-glow);
   }
 
   /* RIGHT — two equal halves */
@@ -109,9 +224,9 @@
 
   #panel-divider {
     height: 1px;
-    background: rgba(51,255,102,0.2);
+    background: var(--hairline);
     margin: 0 20px;
-    box-shadow: 0 0 6px rgba(51,255,102,0.1);
+    box-shadow: var(--panel-glow);
   }
 
   #panel-calendar {
@@ -142,16 +257,16 @@
     flex-direction: column;
     justify-content: center;
     align-items: center;
-    gap: 28px;
-    padding: 0 20px;
-    margin-bottom: 28px;
+    gap: 2.2vw;
+    padding: 0 1.57vw;
+    margin-bottom: 2.2vw;
   }
 
   .colon-dot {
-    width: 20px; height: 20px;
+    width: 1.62vw; height: 1.62vw;
     border-radius: 50%;
-    background: #ccaa52;
-    box-shadow: 0 0 6px #cc8829, 0 0 14px #cc660044;
+    background: var(--digit);
+    box-shadow: var(--colon-shadow);
     animation: blink 4s ease-in-out infinite;
   }
 
@@ -163,7 +278,7 @@
 
   /* SVG digit sizing — overflow visible lets glow bleed outside viewBox */
   .digit-svg { display: block; overflow: visible; }
-  .digit-lg .digit-svg { width: 11vw; height: 18vw; max-width: 178px; max-height: 288px; }
+  .digit-lg .digit-svg { width: 14.4vw; height: 23.3vw; max-width: 276px; max-height: 447px; }
   .digit-sm .digit-svg { width: 7.5vw; height: 12.5vw; max-width: 124px; max-height: 204px; }
   .colon-sep.sm { gap: 20px; padding: 0 14px; }
   .colon-sep.sm .colon-dot { width: 14px; height: 14px; }
@@ -172,18 +287,18 @@
   /* Digit container also needs overflow visible so the SVG glow isn't cropped by the div */
   .digit-lg, .digit-sm { overflow: visible; }
 
-  /* Lit segments emit amber glow */
-  .seg-on  { fill: #ccaa52; filter: drop-shadow(0 0 6px #cc8829); }
-  /* Unlit: dark recessed channel */
-  .seg-off { fill: #0a0a04; }
+  /* Lit segments. Fallout glows; Slate is flat amber. */
+  .seg-on  { fill: var(--digit); filter: var(--seg-filter); }
+  /* Unlit: recessed channel. Slate uses #222226 so segments stay visible. */
+  .seg-off { fill: var(--seg-off); }
 
   /* overflow visible still needed so per-polygon glow bleeds outside viewBox */
   .digit-svg { overflow: visible; }
 
   #ampm-indicator {
-    font-size: 1.6rem;
-    color: #ccaa52;
-    text-shadow: 0 0 8px #cc882966;
+    font-size: 2.05vw;
+    color: var(--digit);
+    text-shadow: var(--digit-shadow);
     letter-spacing: 0.05em;
     align-self: flex-end;
     padding-bottom: 10px;
@@ -194,14 +309,14 @@
   #date-line {
     font-size: 2.1rem;
     letter-spacing: 0.15em;
-    color: #44dd66;
-    text-shadow: 0 0 8px rgba(51,255,102,0.4);
+    color: var(--text-strong);
+    text-shadow: var(--text-shadow);
     text-transform: uppercase;
   }
 
   #date-line .amber {
-    color: #ffcc66;
-    text-shadow: 0 0 8px #ffaa3388;
+    color: var(--emphasis);
+    text-shadow: var(--emphasis-shadow);
   }
 
   /* ─── WEATHER SECTION ─── */
@@ -221,13 +336,15 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    filter: drop-shadow(0 0 5px #33ff66cc) drop-shadow(0 0 16px #33ff6655);
+    filter: var(--icon-filter);
     animation: iconpulse 4s ease-in-out infinite;
   }
 
-  #weather-icon svg {
+  #weather-icon svg,
+  .fc-icon svg {
     width: 100%;
     height: 100%;
+    color: var(--text);
   }
 
   @keyframes iconpulse {
@@ -235,18 +352,23 @@
     50%      { filter: drop-shadow(0 0 8px #33ff66ff) drop-shadow(0 0 24px #33ff6666); }
   }
 
+  html[data-theme="slate"] #weather-icon {
+    animation: none;
+    filter: none;
+  }
+
   #weather-temp {
     font-size: 5.5rem;
-    color: #ffcc66;
-    text-shadow: 0 0 12px #ffaa3388, 0 0 28px #ff880033;
+    color: var(--emphasis);
+    text-shadow: var(--temp-shadow);
     line-height: 1;
     letter-spacing: -0.02em;
   }
 
   #weather-desc {
     font-size: 1.45rem;
-    color: #44dd66;
-    text-shadow: 0 0 8px rgba(51,255,102,0.35);
+    color: var(--text-strong);
+    text-shadow: var(--text-shadow);
     letter-spacing: 0.15em;
     text-align: center;
     text-transform: uppercase;
@@ -255,14 +377,14 @@
 
   #temp-arrow {
     font-size: 3.5rem;
-    color: rgba(204,170,82,0.6);
+    color: var(--arrow);
     vertical-align: middle;
   }
 
   #weather-city {
     font-size: 1rem;
     letter-spacing: 0.3em;
-    color: rgba(51,255,102,0.35);
+    color: var(--text-muted);
     text-transform: uppercase;
     text-align: center;
     margin-bottom: 10px;
@@ -282,7 +404,7 @@
     width: 100%;
     display: flex;
     justify-content: space-around;
-    border-top: 1px solid rgba(51,255,102,0.15);
+    border-top: 1px solid var(--hairline-soft);
     padding-top: 14px;
   }
 
@@ -296,14 +418,14 @@
   .detail-label {
     font-size: 0.9rem;
     letter-spacing: 0.2em;
-    color: rgba(51,255,102,0.5);
+    color: var(--text-secondary);
     text-transform: uppercase;
   }
 
   .detail-value {
     font-size: 1.6rem;
-    color: #ffcc66;
-    text-shadow: 0 0 8px #ffaa3366;
+    color: var(--emphasis);
+    text-shadow: var(--detail-shadow);
     letter-spacing: 0.05em;
   }
 
@@ -311,8 +433,8 @@
   #cal-header {
     font-size: 1.1rem;
     letter-spacing: 0.25em;
-    color: rgba(51,255,102,0.55);
-    text-shadow: 0 0 6px rgba(51,255,102,0.3);
+    color: var(--text-header);
+    text-shadow: var(--text-shadow);
     text-transform: uppercase;
     margin-bottom: 10px;
     align-self: flex-start;
@@ -328,14 +450,14 @@
 
   .cal-dow {
     font-size: 1rem;
-    color: rgba(51,255,102,0.35);
+    color: var(--text-muted);
     letter-spacing: 0.05em;
     padding-bottom: 6px;
   }
 
   .cal-day {
     font-size: 1.3rem;
-    color: rgba(51,255,102,0.6);
+    color: var(--text-day);
     line-height: 1.9;
     letter-spacing: 0.02em;
   }
@@ -343,9 +465,9 @@
   .cal-day.empty { opacity: 0; pointer-events: none; }
 
   .cal-day.today {
-    color: #0a0a00;
-    background: #ccaa52;
-    box-shadow: 0 0 10px #cc882966;
+    color: var(--ink);
+    background: var(--digit);
+    box-shadow: var(--today-shadow);
     border-radius: 3px;
     position: relative;
   }
@@ -355,7 +477,7 @@
     width: 100%;
     display: flex;
     justify-content: space-around;
-    border-top: 1px solid rgba(51,255,102,0.15);
+    border-top: 1px solid var(--hairline-soft);
     padding-top: 12px;
     margin-top: 12px;
   }
@@ -370,7 +492,7 @@
   .fc-name {
     font-size: 0.85rem;
     letter-spacing: 0.15em;
-    color: rgba(51,255,102,0.45);
+    color: var(--text-fc);
     text-transform: uppercase;
   }
 
@@ -380,25 +502,28 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    filter: drop-shadow(0 0 3px #33ff6688);
+    color: var(--text);
+    filter: var(--fc-filter);
   }
-
-  .fc-icon svg { width: 100%; height: 100%; }
 
   .fc-high {
     font-size: 1.2rem;
-    color: #ccaa52;
-    text-shadow: 0 0 6px #cc882955;
+    color: var(--digit);
+    text-shadow: var(--high-shadow);
     letter-spacing: 0.05em;
+  }
+
+  html[data-theme="slate"] .fc-high {
+    color: var(--emphasis);
   }
 
   /* Loading / error state */
   .w-loading {
-    color: rgba(51,255,102,0.4);
+    color: var(--text-faint);
     font-size: 2rem;
     letter-spacing: 0.1em;
     animation: fadepulse 1.5s ease-in-out infinite;
-    font-family: 'VT323', monospace;
+    font-family: var(--font);
   }
 
   @keyframes fadepulse { 0%,100%{opacity:0.4} 50%{opacity:1} }
@@ -406,15 +531,15 @@
   #status-line {
     font-size: 2.1rem;
     letter-spacing: 0.15em;
-    color: #44dd66;
-    text-shadow: 0 0 8px rgba(51,255,102,0.4);
+    color: var(--text-strong);
+    text-shadow: var(--text-shadow);
     text-transform: uppercase;
     min-height: 1.2em;
   }
 
   #status-line .amber {
-    color: #ffcc66;
-    text-shadow: 0 0 8px #ffaa3388;
+    color: var(--emphasis);
+    text-shadow: var(--emphasis-shadow);
   }
 
   #leave-now {
@@ -449,27 +574,27 @@
 
   body[data-mode="countdown"] .digit-lg .digit-svg,
   body[data-mode="late"] .digit-lg .digit-svg {
-    width: 18vw;
-    height: 30vw;
-    max-width: 280px;
-    max-height: 460px;
+    width: 20vw;
+    height: 32.5vw;
+    max-width: 400px;
+    max-height: 650px;
   }
 
   body[data-mode="countdown"] .colon-sep,
   body[data-mode="late"] .colon-sep {
-    gap: 42px;
-    padding: 0 32px;
+    gap: 3.06vw;
+    padding: 0 2.33vw;
   }
 
   body[data-mode="countdown"] .colon-dot,
   body[data-mode="late"] .colon-dot {
-    width: 28px;
-    height: 28px;
+    width: 2.25vw;
+    height: 2.25vw;
   }
 
   body[data-mode="countdown"] #ampm-indicator,
   body[data-mode="late"] #ampm-indicator {
-    font-size: 2.4rem;
+    font-size: 2.85vw;
     padding-bottom: 16px;
   }
 
@@ -483,8 +608,9 @@
   body[data-mode="late"] #clock-display .colon-sep,
   body[data-mode="late"] #ampm-indicator { opacity: 0.12; }
 
-  body[data-band="amber"] .seg-on { fill: #e0b040; filter: drop-shadow(0 0 6px #cc8829); }
-  body[data-band="amber"] .colon-dot { background: #e0b040; }
+  body[data-band="amber"] .seg-on { fill: #f0a04a; filter: drop-shadow(0 0 6px #cc8829); }
+  body[data-band="amber"] .colon-dot { background: #f0a04a; }
+  body[data-band="amber"] #ampm-indicator { color: #f0a04a; }
   body[data-band="orange"] .seg-on { fill: #ff7a2a; filter: drop-shadow(0 0 6px #ff4a00); }
   body[data-band="orange"] .colon-dot { background: #ff7a2a; }
   body[data-band="orange"] #ampm-indicator { color: #ff7a2a; }
@@ -494,6 +620,26 @@
   body[data-band="red"] #status-line { color: #ff6a6a; }
   body[data-band="red"] .colon-dot { animation: blink 1s ease-in-out infinite; }
 
+  html[data-theme="slate"] body[data-band="amber"] .seg-on,
+  html[data-theme="slate"] body[data-band="orange"] .seg-on,
+  html[data-theme="slate"] body[data-band="red"] .seg-on,
+  html[data-theme="slate"] .seg-on {
+    filter: none;
+  }
+
+  html[data-theme="slate"] #ampm-indicator,
+  html[data-theme="slate"] #date-line,
+  html[data-theme="slate"] #date-line .amber,
+  html[data-theme="slate"] #status-line,
+  html[data-theme="slate"] #status-line .amber,
+  html[data-theme="slate"] #weather-temp,
+  html[data-theme="slate"] #weather-desc,
+  html[data-theme="slate"] .detail-value,
+  html[data-theme="slate"] .fc-high,
+  html[data-theme="slate"] #cal-header {
+    text-shadow: none;
+  }
+
   body[data-band="late"] {
     animation: lateflash 0.7s steps(2) infinite;
   }
@@ -501,6 +647,15 @@
   @keyframes lateflash {
     0%, 49% { background: radial-gradient(ellipse at center, #4a0000 0%, #1a0000 100%); }
     50%, 100% { background: radial-gradient(ellipse at center, #1a1a0f 0%, #0a0a00 100%); }
+  }
+
+  @keyframes lateflash-slate {
+    0%, 49% { background: #3a0000; }
+    50%, 100% { background: #070708; }
+  }
+
+  html[data-theme="slate"] body[data-band="late"] {
+    animation-name: lateflash-slate;
   }
 
   .gear {
@@ -512,7 +667,7 @@
     border: 0;
     border-radius: 0 0 0 22px;
     background: transparent;
-    color: rgba(51,255,102,0.28);
+    color: var(--gear);
     font-size: 28px;
     font-family: inherit;
     z-index: 110;
@@ -535,11 +690,11 @@
     width: 100%;
     max-height: 92dvh;
     overflow: auto;
-    background: #10140c;
-    border-top: 1px solid rgba(51,255,102,0.35);
+    background: var(--sheet);
+    border-top: 1px solid var(--hairline-strong);
     border-radius: 20px 20px 0 0;
     padding: 1.2rem 1.2rem calc(1.2rem + env(safe-area-inset-bottom));
-    color: #33ff66;
+    color: var(--text);
   }
 
   .sheet h2 {
@@ -554,11 +709,11 @@
     letter-spacing: 0.14em;
     font-weight: 400;
     margin: 0.9rem 0 0.3rem;
-    color: #ccaa52;
+    color: var(--digit);
   }
 
   .hint {
-    color: rgba(51,255,102,0.55);
+    color: var(--text-hint);
     font-size: 1.05rem;
     line-height: 1.3;
     margin: 0 0 0.7rem;
@@ -575,9 +730,9 @@
     font-family: inherit;
     font-size: 1.15rem;
     letter-spacing: 0.06em;
-    color: #33ff66;
-    background: #1a2414;
-    border: 1px solid rgba(51,255,102,0.3);
+    color: var(--text);
+    background: var(--button);
+    border: 1px solid var(--hairline-button);
     border-radius: 10px;
     min-height: 48px;
     padding: 0.5rem 0.9rem;
@@ -586,16 +741,16 @@
   }
 
   .sheet button.on, .sheet .onoff.on {
-    background: #ccaa52;
-    color: #0a0a00;
-    border-color: #ccaa52;
+    background: var(--digit);
+    color: var(--ink);
+    border-color: var(--digit);
   }
 
   label {
     display: block;
     font-size: 0.85rem;
     letter-spacing: 0.12em;
-    color: rgba(51,255,102,0.5);
+    color: var(--text-secondary);
     margin-bottom: 0.2rem;
     text-transform: uppercase;
   }
@@ -603,10 +758,10 @@
   input.time-field {
     width: 100%;
     min-height: 56px;
-    border: 1px solid rgba(51,255,102,0.25);
+    border: 1px solid var(--hairline-input);
     border-radius: 8px;
-    background: #0a0c08;
-    color: #ffcc66;
+    background: var(--field);
+    color: var(--emphasis);
     font-family: inherit;
     font-size: 1.45rem;
     letter-spacing: 0.08em;
@@ -616,8 +771,8 @@
   }
 
   input.time-field.active {
-    border-color: #ccaa52;
-    box-shadow: 0 0 0 2px rgba(204,170,82,0.35);
+    border-color: var(--digit);
+    box-shadow: var(--active-ring);
   }
 
   .time-pad {
@@ -626,8 +781,8 @@
     z-index: 2;
     margin: 0.85rem -1.2rem calc(-1.2rem);
     padding: 0.7rem 1.2rem calc(0.75rem + env(safe-area-inset-bottom));
-    background: #0c1008;
-    border-top: 1px solid rgba(51,255,102,0.28);
+    background: var(--numpad);
+    border-top: 1px solid var(--hairline-strong);
   }
 
   .time-pad-head {
@@ -636,14 +791,14 @@
     align-items: baseline;
     gap: 0.6rem;
     margin-bottom: 0.45rem;
-    color: rgba(51,255,102,0.55);
+    color: var(--text-hint);
     letter-spacing: 0.1em;
     font-size: 1.05rem;
     text-transform: uppercase;
   }
 
   .time-pad-preview {
-    color: #ffcc66;
+    color: var(--emphasis);
     font-size: 1.45rem;
     letter-spacing: 0.14em;
   }
@@ -665,9 +820,9 @@
 
   .sheet .time-pad .time-pad-done {
     grid-column: 1 / -1;
-    background: #ccaa52;
-    color: #0a0a00;
-    border-color: #ccaa52;
+    background: var(--digit);
+    color: var(--ink);
+    border-color: var(--digit);
   }
 
   .week-head, .day-row {
@@ -680,7 +835,7 @@
   .week-head {
     font-size: 0.8rem;
     letter-spacing: 0.12em;
-    color: rgba(51,255,102,0.4);
+    color: var(--text-faint);
     text-transform: uppercase;
     margin-bottom: 0.3rem;
   }
@@ -692,7 +847,7 @@
 
   .week-val {
     font-size: 1.25rem;
-    color: #ffcc66;
+    color: var(--emphasis);
     padding-bottom: 0.45rem;
   }
 
@@ -787,6 +942,12 @@
   <div class="sheet" onclick="event.stopPropagation()">
     <h2>WEEK FROM GITHUB</h2>
     <p class="hint">Alarm and on-the-road times come from schedule.json. Change them in the repo (or ask Grok) and push. This tablet does not save a private week. Downstairs is 15 minutes before on-the-road. Off days never count down.</p>
+    <h3>THEME</h3>
+    <p class="hint">Fallout stays the morning default until you pick Slate. This stays on the tablet. It does not change GitHub. A ?theme= link only previews this load.</p>
+    <div class="row">
+      <button type="button" id="themeFallout">Fallout</button>
+      <button type="button" id="themeSlate">Slate</button>
+    </div>
     <p class="hint" id="scheduleStatus">Loading week from GitHub…</p>
     <div class="week-head">
       <span>Day</span><span>On</span><span>Alarm</span><span>On the road</span>
@@ -1487,10 +1648,29 @@ function buildWeekRows() {
   });
 }
 
+const STORAGE_THEME = 'morning-board-theme';
+
+function paintThemeButtons() {
+  const theme = document.documentElement.dataset.theme === 'slate' ? 'slate' : 'fallout';
+  document.getElementById('themeFallout').classList.toggle('on', theme === 'fallout');
+  document.getElementById('themeSlate').classList.toggle('on', theme === 'slate');
+}
+
+function chooseTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem(STORAGE_THEME, theme); } catch (e) {}
+  paintThemeButtons();
+}
+
+paintThemeButtons();
+document.getElementById('themeFallout').addEventListener('click', function () { chooseTheme('fallout'); });
+document.getElementById('themeSlate').addEventListener('click', function () { chooseTheme('slate'); });
+
 document.getElementById('gear').addEventListener('click', function () {
   buildWeekRows();
   populateLeaveInput(now());
   populateOneOff(new Date());
+  paintThemeButtons();
   closeTimePad();
   sheetBg.classList.add('open');
 });
@@ -1562,10 +1742,10 @@ document.getElementById('clearPreview').addEventListener('click', function () {
 
 /* ================================================================
    WEATHER — PIP-BOY LINE ART SVG ICONS
-   All icons: viewBox 0 0 100 100, stroke=#33ff66, fill=none, strokeWidth~4-5
+   All icons: viewBox 0 0 100 100, stroke=currentColor, fill=none, strokeWidth~4-5
    ================================================================ */
 
-const S = (paths, label) => `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;overflow:visible" fill="none" stroke="#33ff66" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"${label ? ` role="img" aria-label="${label}"` : ''}>${paths}</svg>`;
+const S = (paths, label) => `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;overflow:visible" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"${label ? ` role="img" aria-label="${label}"` : ''}>${paths}</svg>`;
 
 /* Synodic month from a known new moon (2000-01-06 18:14 UTC). No extra API. */
 const MOON_SYNODIC_DAYS = 29.530588853;
@@ -1588,7 +1768,7 @@ function moonDisk(cx, cy, r, phaseIdx, strokeW) {
   const outline = `<circle cx="${cx}" cy="${cy}" r="${r}" stroke-width="${sw}"/>`;
   if (phaseIdx === 0) return outline;
 
-  const fill = 'fill="#33ff66" fill-opacity="0.38" stroke="none"';
+  const fill = 'fill="currentColor" fill-opacity="0.38" stroke="none"';
   if (phaseIdx === 4) {
     return `${outline}<circle cx="${cx}" cy="${cy}" r="${r}" ${fill}/>`;
   }
