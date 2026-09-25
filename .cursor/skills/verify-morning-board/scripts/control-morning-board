@@ -665,14 +665,24 @@ async function cmdBrowser(argv) {
         return d;
       };
       const keep = new Set(['RootWebArea', 'button', 'textbox', 'heading', 'link', 'status']);
+      const axString = (v) => {
+        if (v == null) return '';
+        if (typeof v === 'string') return v;
+        if (typeof v.value === 'string') return v.value;
+        return '';
+      };
       const lines = [`url=${await evaluate(conn, 'location.href')}`];
       for (const n of nodes) {
         if (n.ignored) continue;
         const role = n.role && n.role.value;
-        const name = (n.name && n.name.value) || '';
+        const name = axString(n.name);
+        const value = axString(n.value) || axString((n.properties || []).find((p) => p.name === 'value')?.value);
         if (!role || role === 'none' || role === 'generic' || role === 'InlineTextBox' || role === 'StaticText' || role === 'LineBreak') continue;
-        if (!name && !keep.has(role)) continue;
-        lines.push(`${'  '.repeat(Math.min(depthOf(n), 8))}${role}${name ? ` ${JSON.stringify(name)}` : ''}`);
+        if (!name && !value && !keep.has(role)) continue;
+        const bits = [`${'  '.repeat(Math.min(depthOf(n), 8))}${role}`];
+        if (name) bits.push(JSON.stringify(name));
+        if (value) bits.push(`value=${JSON.stringify(value)}`);
+        lines.push(bits.join(' '));
       }
       const dest = resolve(out);
       mkdirSync(dirname(dest), { recursive: true });
