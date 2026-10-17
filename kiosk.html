@@ -51,8 +51,10 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
   var lock = 'auto';
   try {
     var faceQ = param('face');
+    var themePreview = known[param('theme')] === 1;
     if (faceQ === 'theme' || faceQ === 'off' || faceQ === 'none') face = '';
     else if (faces[faceQ] === 1) face = faceQ;
+    else if (themePreview && faceQ == null) face = '';
     else {
       var savedFace = localStorage.getItem('morning-board-face');
       if (faces[savedFace] === 1) face = savedFace;
@@ -1488,9 +1490,10 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
       <option value="night">Night</option>
     </select>
     <h3>COLOR THEME</h3>
-    <p class="hint">Fallout stays the morning default until you pick another theme. The color theme shows when the clock face is Color theme. This stays on the tablet. It does not change GitHub. A ?theme= link only previews this load.</p>
+    <p class="hint">Fallout stays the morning default until you pick another theme. Picking one turns the clock face off so this palette shows. This stays on the tablet. It does not change GitHub. A ?theme= link only previews this load.</p>
     <label for="themePick">Theme</label>
     <select id="themePick" class="pick">
+      <option value="">Clock face is on</option>
       <option value="fallout">Fallout</option>
       <option value="slate">Slate</option>
       <option value="dusk">Dusk</option>
@@ -2263,7 +2266,7 @@ function paintPicks() {
   const themePick = document.getElementById('themePick');
   if (facePick) facePick.value = face;
   if (skyPick) skyPick.value = lock;
-  if (themePick) themePick.value = theme;
+  if (themePick) themePick.value = face ? '' : theme;
 }
 
 function invalidateDigits() {
@@ -2296,7 +2299,7 @@ function chooseTheme(theme) {
   if (THEME_IDS[theme] !== 1) return;
   document.documentElement.dataset.theme = theme;
   try { localStorage.setItem(STORAGE_THEME, theme); } catch (e) {}
-  paintPicks();
+  chooseFace('');
 }
 
 paintPicks();
