@@ -5,11 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-store">
 <title>Morning board</title>
+<script src="daily.js?v=18"></script>
 <script>
 /* Style, day/night, and color before first paint.
-   ?theme= ?face= ?sky= preview this load and do not save.
-   Keys: morning-board-theme, morning-board-face, morning-board-sky.
-   A saved fallout theme is Slate. */
+   Each Pacific board day (local Pacific time minus 3 hours, from 3:00 AM)
+   picks one style and one color. That pair is not stored.
+   ?theme= ?face= ?sky= ?board= preview this load and do not save.
+   A specific style or color is morning-board-face-day / morning-board-theme-day,
+   stamped with the board day. A stamp from an older board day is ignored.
+   Plain morning-board-theme / morning-board-face values from before this are ignored.
+   Sky stays morning-board-sky. */
 function parseSunIso(s) {
   if (!s || typeof s !== 'string') return null;
   var m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/.exec(s);
@@ -36,28 +41,42 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
   var themes = { slate: 1, dusk: 1, ember: 1, bone: 1 };
   var faces = { nixie: 1, segment: 1 };
   var locks = { auto: 1, day: 1, night: 1 };
+  var daily = (typeof MorningDaily === 'object' && MorningDaily) ? MorningDaily : null;
   var theme = 'slate';
   var face = 'nixie';
   var lock = 'auto';
+  var board = '';
+  var boardPreview = false;
   var params;
   try { params = new URLSearchParams(location.search); } catch (e) { params = null; }
   function param(name) { return params ? params.get(name) : null; }
+  function storedOverride(key, boardDay, allowed) {
+    if (!daily || !boardDay) return null;
+    try { return daily.activeOverride(localStorage.getItem(key), boardDay, allowed); } catch (e) { return null; }
+  }
   try {
+    var boardQ = param('board');
+    if (daily && daily.validYmd(boardQ)) {
+      board = boardQ;
+      boardPreview = true;
+    } else if (daily) {
+      board = daily.boardDay(new Date());
+    }
+    if (daily && board) {
+      var pair = daily.pairForBoardDay(board);
+      theme = pair.theme;
+      face = pair.face;
+    }
+    if (!boardPreview) {
+      var themeOver = storedOverride('morning-board-theme-day', board, themes);
+      var faceOver = storedOverride('morning-board-face-day', board, faces);
+      if (themeOver) theme = themeOver;
+      if (faceOver) face = faceOver;
+    }
     var themeQ = param('theme');
     if (themes[themeQ] === 1) theme = themeQ;
-    else {
-      var saved = localStorage.getItem('morning-board-theme');
-      if (saved === 'fallout') {
-        theme = 'slate';
-        try { localStorage.setItem('morning-board-theme', 'slate'); } catch (e2) {}
-      } else if (themes[saved] === 1) theme = saved;
-    }
     var faceQ = param('face');
     if (faces[faceQ] === 1) face = faceQ;
-    else if (faceQ == null) {
-      var savedFace = localStorage.getItem('morning-board-face');
-      if (faces[savedFace] === 1) face = savedFace;
-    }
     var skyQ = param('sky');
     if (locks[skyQ] === 1) lock = skyQ;
     else if (skyQ == null) {
@@ -78,6 +97,8 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
   root.setAttribute('data-face', face);
   root.setAttribute('data-sky', sky);
   root.setAttribute('data-sky-lock', lock);
+  if (board) root.setAttribute('data-board', board);
+  if (boardPreview) root.setAttribute('data-board-preview', board);
 })();
 </script>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500&family=Nixie+One&display=swap" rel="stylesheet">
@@ -1022,6 +1043,11 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
     margin: 0 0 0.7rem;
   }
 
+  #dailyLine {
+    color: var(--emphasis);
+    letter-spacing: 0.06em;
+  }
+
   .row {
     display: flex;
     gap: 0.55rem;
@@ -1261,9 +1287,11 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
     <h2>WEEK FROM GITHUB</h2>
     <p class="hint">Alarm and on-the-road times come from schedule.json. Change them in the repo (or ask Grok) and push. This tablet does not save a private week. Downstairs is 15 minutes before on-the-road. Off days never count down.</p>
     <h3>STYLE</h3>
-    <p class="hint">How the clock is drawn. Nixie or clean Segment. Day, night, and color stay as they are.</p>
+    <p class="hint" id="dailyLine">Today: Nixie · Slate</p>
+    <p class="hint">Random daily picks Nixie or Segment at 3:00 AM Pacific and keeps it until the next morning. A specific style holds only until then. Day, night, and color stay as they are.</p>
     <label for="facePick">Style</label>
     <select id="facePick" class="pick">
+      <option value="daily">Random daily</option>
       <option value="nixie">Nixie</option>
       <option value="segment">Segment</option>
     </select>
@@ -1276,9 +1304,10 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
       <option value="night">Night</option>
     </select>
     <h3>COLOR</h3>
-    <p class="hint">Colors the digits. The same color works on both styles, day and night. This stays on the tablet. A ?theme= link only previews this load.</p>
+    <p class="hint">Random daily picks Slate, Dusk, Ember, or Bone the same way. A specific color holds only until 3:00 AM Pacific. A ?theme= link only previews this load.</p>
     <label for="themePick">Color</label>
     <select id="themePick" class="pick">
+      <option value="daily">Random daily</option>
       <option value="slate">Slate</option>
       <option value="dusk">Dusk</option>
       <option value="ember">Ember</option>
@@ -1801,12 +1830,16 @@ function ensureClockTimer(mode) {
 }
 
 function tickClock() {
+  if (dailyReady) applyResolvedLook();
   applyResolvedSky();
   ensureCalendar();
   const n = now();
   const state = morningState(n);
   const status = document.getElementById('status-main');
-  const dateBit = DAYS[n.getDay()] + ' ' + n.getDate() + ' ' + MONTHS[n.getMonth()];
+  const shown = shownCalendarDate();
+  const dateBit = shown
+    ? DAYS[shown.getUTCDay()] + ' ' + shown.getUTCDate() + ' ' + MONTHS[shown.getUTCMonth()]
+    : DAYS[n.getDay()] + ' ' + n.getDate() + ' ' + MONTHS[n.getMonth()];
 
   document.body.dataset.mode = state.mode;
   ensureClockTimer(state.mode);
@@ -1859,6 +1892,7 @@ document.addEventListener('visibilitychange', function () {
   if (document.visibilityState === 'visible') {
     fetchSchedule();
     ensureCalendar();
+    if (dailyReady) applyResolvedLook();
   }
 });
 
@@ -2018,13 +2052,19 @@ function buildWeekRows() {
   });
 }
 
-const STORAGE_THEME = 'morning-board-theme';
-const STORAGE_FACE = 'morning-board-face';
+const STORAGE_THEME_DAY = 'morning-board-theme-day';
+const STORAGE_FACE_DAY = 'morning-board-face-day';
 const STORAGE_SKY = 'morning-board-sky';
 
 const THEME_IDS = { slate: 1, dusk: 1, ember: 1, bone: 1 };
 const FACE_IDS = { nixie: 1, segment: 1 };
 const SKY_LOCKS = { auto: 1, day: 1, night: 1 };
+const FACE_LABEL = { nixie: 'Nixie', segment: 'Segment' };
+const THEME_LABEL = { slate: 'Slate', dusk: 'Dusk', ember: 'Ember', bone: 'Bone' };
+var dailyReady = false;
+var facePin = null;
+var themePin = null;
+var boardPin = null;
 
 function applyResolvedSky() {
   const root = document.documentElement;
@@ -2040,17 +2080,75 @@ function applyResolvedSky() {
   if (next !== showing) root.setAttribute('data-sky', next);
 }
 
+function safeGet(key) {
+  try { return localStorage.getItem(key); } catch (e) { return null; }
+}
+
+function queryParam(name) {
+  try { return new URLSearchParams(location.search).get(name); } catch (e) { return null; }
+}
+
+function shownCalendarDate() {
+  const ymd = document.documentElement.getAttribute('data-board-preview');
+  if (!ymd || typeof MorningDaily !== 'object' || !MorningDaily.validYmd(ymd)) return null;
+  const parts = ymd.split('-');
+  return new Date(Date.UTC(+parts[0], +parts[1] - 1, +parts[2], 12, 0, 0));
+}
+
+function paintDailyLine() {
+  const el = document.getElementById('dailyLine');
+  if (!el) return;
+  const root = document.documentElement;
+  const face = FACE_LABEL[root.getAttribute('data-face')] || 'Nixie';
+  const theme = THEME_LABEL[root.dataset.theme] || 'Slate';
+  el.textContent = 'Today: ' + face + ' · ' + theme;
+}
+
+function applyResolvedLook() {
+  if (typeof MorningDaily !== 'object' || !MorningDaily.pairForBoardDay) return;
+  const root = document.documentElement;
+  const board = boardPin || MorningDaily.boardDay(new Date());
+  const pair = MorningDaily.pairForBoardDay(board);
+  let face = pair.face;
+  let theme = pair.theme;
+  if (!boardPin) {
+    const faceOver = MorningDaily.activeOverride(safeGet(STORAGE_FACE_DAY), board, FACE_IDS);
+    const themeOver = MorningDaily.activeOverride(safeGet(STORAGE_THEME_DAY), board, THEME_IDS);
+    if (faceOver) face = faceOver;
+    if (themeOver) theme = themeOver;
+  }
+  if (facePin) face = facePin;
+  if (themePin) theme = themePin;
+  const faceChanged = root.getAttribute('data-face') !== face;
+  const boardChanged = root.getAttribute('data-board') !== board;
+  root.setAttribute('data-face', face);
+  root.dataset.theme = theme;
+  root.setAttribute('data-board', board);
+  if (boardPin) root.setAttribute('data-board-preview', boardPin);
+  if (faceChanged) invalidateDigits();
+  paintDailyLine();
+  if (boardChanged) paintPicks();
+}
+
 function paintPicks() {
   const root = document.documentElement;
-  const face = FACE_IDS[root.getAttribute('data-face')] === 1 ? root.getAttribute('data-face') : 'nixie';
+  const board = root.getAttribute('data-board');
   const lock = SKY_LOCKS[root.getAttribute('data-sky-lock')] === 1 ? root.getAttribute('data-sky-lock') : 'auto';
-  const theme = THEME_IDS[root.dataset.theme] === 1 ? root.dataset.theme : 'slate';
+  let faceValue = 'daily';
+  let themeValue = 'daily';
+  if (!boardPin && typeof MorningDaily === 'object') {
+    const faceOver = MorningDaily.activeOverride(safeGet(STORAGE_FACE_DAY), board, FACE_IDS);
+    const themeOver = MorningDaily.activeOverride(safeGet(STORAGE_THEME_DAY), board, THEME_IDS);
+    if (faceOver) faceValue = faceOver;
+    if (themeOver) themeValue = themeOver;
+  }
   const facePick = document.getElementById('facePick');
   const skyPick = document.getElementById('skyPick');
   const themePick = document.getElementById('themePick');
-  if (facePick) facePick.value = face;
+  if (facePick) facePick.value = faceValue;
   if (skyPick) skyPick.value = lock;
-  if (themePick) themePick.value = theme;
+  if (themePick) themePick.value = themeValue;
+  paintDailyLine();
 }
 
 function invalidateDigits() {
@@ -2061,10 +2159,15 @@ function invalidateDigits() {
 }
 
 function chooseFace(face) {
-  if (FACE_IDS[face] !== 1) return;
-  document.documentElement.setAttribute('data-face', face);
-  try { localStorage.setItem(STORAGE_FACE, face); } catch (e) {}
-  invalidateDigits();
+  facePin = null;
+  const board = document.documentElement.getAttribute('data-board') || (typeof MorningDaily === 'object' ? MorningDaily.boardDay(new Date()) : '');
+  if (face === 'daily') {
+    try { localStorage.removeItem(STORAGE_FACE_DAY); } catch (e) {}
+  } else {
+    if (FACE_IDS[face] !== 1) return;
+    try { localStorage.setItem(STORAGE_FACE_DAY, JSON.stringify({ board: board, value: face })); } catch (e) {}
+  }
+  applyResolvedLook();
   paintPicks();
   tickClock();
 }
@@ -2078,11 +2181,28 @@ function chooseSky(lock) {
 }
 
 function chooseTheme(theme) {
-  if (THEME_IDS[theme] !== 1) return;
-  document.documentElement.dataset.theme = theme;
-  try { localStorage.setItem(STORAGE_THEME, theme); } catch (e) {}
+  themePin = null;
+  const board = document.documentElement.getAttribute('data-board') || (typeof MorningDaily === 'object' ? MorningDaily.boardDay(new Date()) : '');
+  if (theme === 'daily') {
+    try { localStorage.removeItem(STORAGE_THEME_DAY); } catch (e) {}
+  } else {
+    if (THEME_IDS[theme] !== 1) return;
+    try { localStorage.setItem(STORAGE_THEME_DAY, JSON.stringify({ board: board, value: theme })); } catch (e) {}
+  }
+  applyResolvedLook();
   paintPicks();
 }
+
+(function initDailyPins() {
+  const faceQ = queryParam('face');
+  const themeQ = queryParam('theme');
+  const boardQ = queryParam('board');
+  if (FACE_IDS[faceQ] === 1) facePin = faceQ;
+  if (THEME_IDS[themeQ] === 1) themePin = themeQ;
+  if (typeof MorningDaily === 'object' && MorningDaily.validYmd(boardQ)) boardPin = boardQ;
+  dailyReady = true;
+  applyResolvedLook();
+})();
 
 paintPicks();
 document.getElementById('facePick').addEventListener('change', function () {
@@ -2486,17 +2606,20 @@ async function fetchWeather(lat, lon) {
    already ticks, but a leftover kiosk tab can sleep past midnight.
    ================================================================ */
 function renderCalendar() {
-  const now   = new Date();
-  const year  = now.getFullYear();
-  const month = now.getMonth();
-  const today = now.getDate();
-  lastCalendarStamp = dateStamp(now);
+  const preview = shownCalendarDate();
+  const now   = preview || new Date();
+  const year  = preview ? preview.getUTCFullYear() : now.getFullYear();
+  const month = preview ? preview.getUTCMonth() : now.getMonth();
+  const today = preview ? preview.getUTCDate() : now.getDate();
+  lastCalendarStamp = preview
+    ? preview.getUTCFullYear() + '-' + pad2(preview.getUTCMonth() + 1) + '-' + pad2(preview.getUTCDate())
+    : dateStamp(now);
 
   const monthName = MONTHS[month];
   document.getElementById('cal-header').textContent = `${monthName} ${year}`;
 
-  const firstDow  = new Date(year, month, 1).getDay(); // 0=Sun
-  const daysInMo  = new Date(year, month + 1, 0).getDate();
+  const firstDow  = preview ? new Date(Date.UTC(year, month, 1)).getUTCDay() : new Date(year, month, 1).getDay(); // 0=Sun
+  const daysInMo  = preview ? new Date(Date.UTC(year, month + 1, 0)).getUTCDate() : new Date(year, month + 1, 0).getDate();
 
   let html = DOW.map(d => `<div class="cal-dow">${d}</div>`).join('');
 
@@ -2512,7 +2635,9 @@ function renderCalendar() {
 }
 
 function ensureCalendar() {
-  if (dateStamp(new Date()) === lastCalendarStamp) return;
+  if (shownCalendarDate()) {
+    if (lastCalendarStamp) return;
+  } else if (dateStamp(new Date()) === lastCalendarStamp) return;
   renderCalendar();
 }
 
