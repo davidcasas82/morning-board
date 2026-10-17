@@ -6,22 +6,81 @@
 <meta http-equiv="Cache-Control" content="no-store">
 <title>Morning board</title>
 <script>
-/* Theme before first paint. ?theme= previews this load and does not save. */
+/* Theme, clock face, and day/night before first paint.
+   ?theme= ?face= ?sky= preview this load and do not save.
+   Clock-face keys are separate from morning-board-theme. */
+function parseSunIso(s) {
+  if (!s || typeof s !== 'string') return null;
+  var m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/.exec(s);
+  if (!m) return null;
+  var d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], 0, 0);
+  if (isNaN(d.getTime())) return null;
+  return d;
+}
+/* Night before sunrise and from sunset on. Day from sunrise until sunset.
+   Missing times keep whatever version is already showing. */
+function skyFromSun(now, sunriseIso, sunsetIso, showing) {
+  var fallback = showing === 'day' ? 'day' : 'night';
+  if (!now || isNaN(now.getTime())) return fallback;
+  var riseClock = parseSunIso(sunriseIso);
+  var setClock = parseSunIso(sunsetIso);
+  if (!riseClock || !setClock) return fallback;
+  var rise = new Date(now.getFullYear(), now.getMonth(), now.getDate(), riseClock.getHours(), riseClock.getMinutes(), 0, 0);
+  var set = new Date(now.getFullYear(), now.getMonth(), now.getDate(), setClock.getHours(), setClock.getMinutes(), 0, 0);
+  if (isNaN(rise.getTime()) || isNaN(set.getTime())) return fallback;
+  if (now.getTime() >= rise.getTime() && now.getTime() < set.getTime()) return 'day';
+  return 'night';
+}
 (function () {
   var theme = 'fallout';
   var known = { fallout: 1, slate: 1, dusk: 1, ember: 1, bone: 1 };
+  var faces = { nixie: 1, segment: 1 };
+  var locks = { auto: 1, day: 1, night: 1 };
+  var params;
+  try { params = new URLSearchParams(location.search); } catch (e) { params = null; }
+  function param(name) { return params ? params.get(name) : null; }
   try {
-    var q = new URLSearchParams(location.search).get('theme');
+    var q = param('theme');
     if (known[q] === 1) theme = q;
     else {
       var saved = localStorage.getItem('morning-board-theme');
       if (known[saved] === 1) theme = saved;
     }
   } catch (e) {}
-  document.documentElement.setAttribute('data-theme', theme);
+  var face = '';
+  var lock = 'auto';
+  try {
+    var faceQ = param('face');
+    if (faceQ === 'theme' || faceQ === 'off' || faceQ === 'none') face = '';
+    else if (faces[faceQ] === 1) face = faceQ;
+    else {
+      var savedFace = localStorage.getItem('morning-board-face');
+      if (faces[savedFace] === 1) face = savedFace;
+    }
+    var skyQ = param('sky');
+    if (locks[skyQ] === 1) lock = skyQ;
+    else {
+      var savedSky = localStorage.getItem('morning-board-sky');
+      if (locks[savedSky] === 1) lock = savedSky;
+    }
+  } catch (e) {}
+  var sky = 'night';
+  if (lock === 'day' || lock === 'night') sky = lock;
+  else {
+    try {
+      var sun = JSON.parse(localStorage.getItem('morning-board-sun') || 'null');
+      if (sun && sun.sunrise && sun.sunset) sky = skyFromSun(new Date(), sun.sunrise, sun.sunset, sky);
+    } catch (e) {}
+  }
+  var root = document.documentElement;
+  root.setAttribute('data-theme', theme);
+  if (face) root.setAttribute('data-face', face);
+  else root.removeAttribute('data-face');
+  root.setAttribute('data-sky', sky);
+  root.setAttribute('data-sky-lock', lock);
 })();
 </script>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500&family=VT323&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500&family=Nixie+One&family=VT323&display=swap" rel="stylesheet">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -806,6 +865,313 @@
     animation-name: lateflash-flat;
   }
 
+  /* Clock face owns the ground: pure black at night, pure white by day.
+     Color themes stay underneath until a face is chosen. */
+  html[data-face][data-sky="night"] {
+    --page-center: #000000;
+    --page-mid: #000000;
+    --page-edge: #000000;
+    --sheet: #000000;
+    --numpad: #000000;
+    --field: #000000;
+    --button: #1a1a1a;
+    --seg-off: transparent;
+    --hairline: #8d8d8d;
+    --hairline-soft: #8d8d8d;
+    --hairline-strong: #8d8d8d;
+    --hairline-button: #8d8d8d;
+    --hairline-input: #8d8d8d;
+    --divider-glow: none;
+    --panel-glow: none;
+    --text: #ffffff;
+    --text-strong: #ffffff;
+    --text-secondary: #ffffff;
+    --text-hint: #ffffff;
+    --text-muted: #ffffff;
+    --text-faint: #ffffff;
+    --text-day: #ffffff;
+    --text-header: #ffffff;
+    --text-fc: #ffffff;
+    --digit: #ffffff;
+    --emphasis: #ffffff;
+    --ink: #000000;
+    --font: 'IBM Plex Sans', sans-serif;
+    --seg-filter: none;
+    --colon-shadow: none;
+    --digit-shadow: none;
+    --text-shadow: none;
+    --emphasis-shadow: none;
+    --temp-shadow: none;
+    --today-shadow: none;
+    --high-shadow: none;
+    --detail-shadow: none;
+    --active-ring: 0 0 0 2px #ffffff;
+    --icon-filter: none;
+    --fc-filter: none;
+    --gear: #ffffff;
+    --arrow: #ffffff;
+    --barrel-radius: 0;
+    --barrel-shadow: none;
+    --crt: 0;
+  }
+
+  html[data-face][data-sky="day"] {
+    --page-center: #ffffff;
+    --page-mid: #ffffff;
+    --page-edge: #ffffff;
+    --sheet: #ffffff;
+    --numpad: #ffffff;
+    --field: #ffffff;
+    --button: #f2f2f2;
+    --seg-off: transparent;
+    --hairline: #595959;
+    --hairline-soft: #595959;
+    --hairline-strong: #595959;
+    --hairline-button: #595959;
+    --hairline-input: #595959;
+    --divider-glow: none;
+    --panel-glow: none;
+    --text: #000000;
+    --text-strong: #000000;
+    --text-secondary: #000000;
+    --text-hint: #000000;
+    --text-muted: #000000;
+    --text-faint: #000000;
+    --text-day: #000000;
+    --text-header: #000000;
+    --text-fc: #000000;
+    --digit: #000000;
+    --emphasis: #000000;
+    --ink: #ffffff;
+    --font: 'IBM Plex Sans', sans-serif;
+    --seg-filter: none;
+    --colon-shadow: none;
+    --digit-shadow: none;
+    --text-shadow: none;
+    --emphasis-shadow: none;
+    --temp-shadow: none;
+    --today-shadow: none;
+    --high-shadow: none;
+    --detail-shadow: none;
+    --active-ring: 0 0 0 2px #000000;
+    --icon-filter: none;
+    --fc-filter: none;
+    --gear: #000000;
+    --arrow: #000000;
+    --barrel-radius: 0;
+    --barrel-shadow: none;
+    --crt: 0;
+  }
+
+  html[data-face] body::before,
+  html[data-face] body::after {
+    display: none;
+  }
+
+  html[data-face] #weather-icon {
+    animation: none;
+    filter: none;
+  }
+
+  html[data-face] .seg-on,
+  html[data-face] body[data-band="amber"] .seg-on,
+  html[data-face] body[data-band="orange"] .seg-on,
+  html[data-face] body[data-band="red"] .seg-on {
+    fill: var(--digit);
+    filter: none;
+  }
+
+  html[data-face] .seg-off { fill: transparent; }
+
+  html[data-face] .colon-dot,
+  html[data-face] body[data-band="amber"] .colon-dot,
+  html[data-face] body[data-band="orange"] .colon-dot,
+  html[data-face] body[data-band="red"] .colon-dot {
+    background: var(--digit);
+    box-shadow: none;
+    animation: none;
+    opacity: 1;
+  }
+
+  html[data-face] #ampm-indicator,
+  html[data-face] body[data-band="amber"] #ampm-indicator,
+  html[data-face] body[data-band="orange"] #ampm-indicator,
+  html[data-face] body[data-band="red"] #ampm-indicator {
+    color: var(--digit);
+    text-shadow: none;
+  }
+
+  html[data-face="segment"] .colon-sep {
+    align-self: center;
+    gap: 64px;
+    padding: 0 28px;
+    margin-bottom: 0;
+  }
+
+  html[data-face="nixie"] .digit-lg { overflow: visible; }
+  html[data-face="nixie"] .nix-tube {
+    width: 196px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  html[data-face="nixie"] .nix-glass {
+    position: relative;
+    width: 196px;
+    height: 400px;
+    border-radius: 98px 98px 24px 24px;
+    background: #000000;
+    border: 2px solid rgba(255,255,255,0.55);
+    box-shadow:
+      inset 12px 0 16px rgba(255,255,255,0.08),
+      inset 0 18px 22px rgba(255,255,255,0.05),
+      0 0 18px rgba(255, 90, 16, 0.28);
+    overflow: hidden;
+  }
+  html[data-face="nixie"] .nix-stage { position: absolute; inset: 0; }
+  html[data-face="nixie"] .nix-wire {
+    position: absolute;
+    left: 50%;
+    top: 48%;
+    font-family: 'Nixie One', serif;
+    font-size: 214px;
+    line-height: 1;
+    white-space: nowrap;
+  }
+  html[data-face="nixie"] .nix-wire.ghost {
+    color: #4a342c;
+    text-shadow: 0 0 1px #7a5344;
+    z-index: 1;
+  }
+  html[data-face="nixie"] .nix-wire.bloom {
+    color: #ff5a00;
+    filter: blur(12px);
+    opacity: 0.9;
+    z-index: 2;
+    transform: translate(-50%, -50%);
+  }
+  html[data-face="nixie"] .nix-wire.filament {
+    color: #ffffff;
+    z-index: 4;
+    text-shadow:
+      0 0 2px #ffffff,
+      0 0 8px #ffd0a4,
+      0 0 16px #ff7a18,
+      0 0 34px rgba(255, 60, 0, 0.9);
+    transform: translate(-50%, -50%);
+  }
+  html[data-face="nixie"] .nix-mesh {
+    position: absolute;
+    inset: 16px 14px 18px;
+    border-radius: 80px 80px 14px 14px;
+    background: repeating-linear-gradient(
+      to bottom,
+      rgba(255, 186, 130, 0.08) 0 1px,
+      transparent 1px 5px
+    );
+    z-index: 5;
+    pointer-events: none;
+  }
+  html[data-face="nixie"] .nix-shine {
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(98deg, rgba(255,255,255,0.22) 0%, rgba(255,255,255,0.04) 10%, transparent 24%),
+      radial-gradient(ellipse at 50% 6%, rgba(255,255,255,0.18), transparent 30%);
+    z-index: 6;
+    pointer-events: none;
+  }
+  html[data-face="nixie"] .nix-getter {
+    position: absolute;
+    top: 26px;
+    right: 34px;
+    width: 22px;
+    height: 14px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 32% 30%, #f4f6f8, #9aa1a8 42%, #3e444a 72%, transparent 74%);
+    opacity: 0.75;
+    z-index: 3;
+  }
+  html[data-face="nixie"] .nix-collar {
+    width: 132px;
+    height: 12px;
+    margin-top: -2px;
+    background: linear-gradient(#6a645e, #2e2b28);
+  }
+  html[data-face="nixie"] .nix-socket {
+    width: 108px;
+    height: 14px;
+    background: linear-gradient(#3a3835, #141312);
+    border-radius: 0 0 7px 7px;
+  }
+  html[data-face="nixie"] .colon-sep {
+    align-self: center;
+    width: 64px;
+    height: 220px;
+    margin-bottom: 18px;
+    gap: 48px;
+    padding: 0;
+    border-radius: 32px 32px 14px 14px;
+    border: 2px solid rgba(255,255,255,0.55);
+    background: #000000;
+    box-shadow: inset 8px 0 12px rgba(255,255,255,0.06);
+    position: relative;
+  }
+  html[data-face="nixie"][data-sky="night"] .colon-dot {
+    width: 18px;
+    height: 18px;
+    background: radial-gradient(circle at 40% 35%, #ffffff, #ffb15a 38%, #ff4d00 72%);
+    box-shadow: 0 0 8px #ffffff, 0 0 16px #ff7a18;
+  }
+
+  html[data-face="nixie"][data-sky="day"] .nix-glass {
+    background: #ffffff;
+    border: 3px solid #000000;
+    box-shadow: inset 10px 0 14px rgba(0,0,0,0.06), inset -12px 0 16px rgba(0,0,0,0.08);
+  }
+  html[data-face="nixie"][data-sky="day"] .nix-wire.ghost {
+    color: #c4c4c4;
+    text-shadow: none;
+  }
+  html[data-face="nixie"][data-sky="day"] .nix-wire.bloom { opacity: 0; }
+  html[data-face="nixie"][data-sky="day"] .nix-wire.filament {
+    color: #000000;
+    text-shadow: none;
+  }
+  html[data-face="nixie"][data-sky="day"] .nix-mesh { opacity: 0.35; }
+  html[data-face="nixie"][data-sky="day"] .nix-shine {
+    background: linear-gradient(98deg, rgba(0,0,0,0.05) 0%, transparent 18%);
+  }
+  html[data-face="nixie"][data-sky="day"] .nix-collar,
+  html[data-face="nixie"][data-sky="day"] .nix-socket {
+    background: #000000;
+  }
+  html[data-face="nixie"][data-sky="day"] .colon-sep {
+    background: #ffffff;
+    border: 3px solid #000000;
+    box-shadow: none;
+  }
+  html[data-face="nixie"][data-sky="day"] .colon-dot {
+    width: 16px;
+    height: 16px;
+    background: #000000;
+    box-shadow: none;
+  }
+
+  html[data-face="nixie"] body[data-mode="countdown"] .nix-glass,
+  html[data-face="nixie"] body[data-mode="late"] .nix-glass {
+    width: 240px;
+    height: 490px;
+  }
+  html[data-face="nixie"] body[data-mode="countdown"] .nix-tube,
+  html[data-face="nixie"] body[data-mode="late"] .nix-tube {
+    width: 240px;
+  }
+  html[data-face="nixie"] body[data-mode="countdown"] .nix-wire,
+  html[data-face="nixie"] body[data-mode="late"] .nix-wire {
+    font-size: 260px;
+  }
+
   .gear {
     position: fixed;
     top: 0;
@@ -903,6 +1269,21 @@
     color: var(--text-secondary);
     margin-bottom: 0.2rem;
     text-transform: uppercase;
+  }
+
+  .sheet select.pick {
+    display: block;
+    width: 100%;
+    min-height: 56px;
+    margin: 0 0 0.85rem;
+    padding: 0 0.75rem;
+    font-family: inherit;
+    font-size: 1.35rem;
+    letter-spacing: 0.04em;
+    color: var(--text);
+    background: var(--field);
+    border: 1px solid var(--hairline-input);
+    border-radius: 8px;
   }
 
   input.time-field {
@@ -1092,15 +1473,30 @@
   <div class="sheet" onclick="event.stopPropagation()">
     <h2>WEEK FROM GITHUB</h2>
     <p class="hint">Alarm and on-the-road times come from schedule.json. Change them in the repo (or ask Grok) and push. This tablet does not save a private week. Downstairs is 15 minutes before on-the-road. Off days never count down.</p>
-    <h3>THEME</h3>
-    <p class="hint">Fallout stays the morning default until you pick another theme. This stays on the tablet. It does not change GitHub. A ?theme= link only previews this load.</p>
-    <div class="row" id="themeRow">
-      <button type="button" id="themeFallout" data-theme-choice="fallout">Fallout</button>
-      <button type="button" id="themeSlate" data-theme-choice="slate">Slate</button>
-      <button type="button" id="themeDusk" data-theme-choice="dusk">Dusk</button>
-      <button type="button" id="themeEmber" data-theme-choice="ember">Ember</button>
-      <button type="button" id="themeBone" data-theme-choice="bone">Bone</button>
-    </div>
+    <h3>CLOCK FACE</h3>
+    <p class="hint">Nixie or Segment takes the whole board. Night is pure black. Day is pure white. Auto follows sunrise and sunset here. Day or Night locks that version so you can see it. This stays on the tablet. A ?face= or ?sky= link only previews this load.</p>
+    <label for="facePick">Face</label>
+    <select id="facePick" class="pick">
+      <option value="">Color theme</option>
+      <option value="nixie">Nixie</option>
+      <option value="segment">Segment</option>
+    </select>
+    <label for="skyPick">Day and night</label>
+    <select id="skyPick" class="pick">
+      <option value="auto">Auto</option>
+      <option value="day">Day</option>
+      <option value="night">Night</option>
+    </select>
+    <h3>COLOR THEME</h3>
+    <p class="hint">Fallout stays the morning default until you pick another theme. The color theme shows when the clock face is Color theme. This stays on the tablet. It does not change GitHub. A ?theme= link only previews this load.</p>
+    <label for="themePick">Theme</label>
+    <select id="themePick" class="pick">
+      <option value="fallout">Fallout</option>
+      <option value="slate">Slate</option>
+      <option value="dusk">Dusk</option>
+      <option value="ember">Ember</option>
+      <option value="bone">Bone</option>
+    </select>
     <p class="hint" id="scheduleStatus">Loading week from GitHub…</p>
     <div class="week-head">
       <span>Day</span><span>On</span><span>Alarm</span><span>On the road</span>
@@ -1179,7 +1575,7 @@ const SEG_MAP = {
   9:[1,1,1,1,0,1,1]
 };
 
-function makeSvgDigit(w, h, segs) {
+function makeSvgDigit(w, h, segs, litOnly) {
   const t  = 0.13; // thickness ratio
   const th = h * t;
   const tw = w * t;
@@ -1189,6 +1585,7 @@ function makeSvgDigit(w, h, segs) {
 
   // Horizontal bar: full width minus corner gaps
   function hbar(y, idx) {
+    if (litOnly && !segs[idx]) return '';
     const x0 = tw + g, x1 = w - tw - g, midY = y;
     const pts = [
       `${x0},${midY}`,
@@ -1203,6 +1600,7 @@ function makeSvgDigit(w, h, segs) {
 
   // Vertical bar
   function vbar(x, y0, y1, idx) {
+    if (litOnly && !segs[idx]) return '';
     const midX = x, top = y0 + g, bot = y1 - g;
     const pts = [
       `${midX},${top}`,
@@ -1231,14 +1629,47 @@ function makeSvgDigit(w, h, segs) {
   return svg;
 }
 
+const NIXIE_GHOSTS = {
+  0: ['8','6','5'],
+  1: ['7','4','0'],
+  2: ['5','8','6'],
+  3: ['8','9','5'],
+  4: ['9','1','0'],
+  5: ['6','3','9'],
+  6: ['8','5','0'],
+  7: ['1','4','3'],
+  8: ['0','6','9'],
+  9: ['8','3','0']
+};
+const NIXIE_SHIFTS = [[-16, 8, 0.97], [14, -11, 0.94], [-7, 15, 0.92]];
+
+function nixieTube(num) {
+  const ghosts = NIXIE_GHOSTS[num] || [];
+  let html = '';
+  for (let i = 0; i < ghosts.length; i++) {
+    const shift = NIXIE_SHIFTS[i];
+    html += '<span class="nix-wire ghost" style="transform:translate(calc(-50% + ' + shift[0] + 'px), calc(-50% + ' + shift[1] + 'px)) scale(' + shift[2] + ')">' + ghosts[i] + '</span>';
+  }
+  return '<div class="nix-tube"><div class="nix-glass"><div class="nix-stage">' + html +
+    '<span class="nix-wire bloom">' + num + '</span>' +
+    '<span class="nix-wire filament">' + num + '</span>' +
+    '</div><div class="nix-getter"></div><div class="nix-mesh"></div><div class="nix-shine"></div></div>' +
+    '<div class="nix-collar"></div><div class="nix-socket"></div></div>';
+}
+
 function renderDigit(el, num) {
-  const key = String(num);
+  const face = document.documentElement.getAttribute('data-face') || '';
+  const key = face + ':' + String(num);
   if (el.dataset.digit === key) return;
   el.dataset.digit = key;
+  if (face === 'nixie') {
+    el.innerHTML = nixieTube(num);
+    return;
+  }
   const isLg = el.classList.contains('digit-lg');
   const w = isLg ? 178 : 124;
   const h = isLg ? 288 : 204;
-  el.innerHTML = makeSvgDigit(w, h, SEG_MAP[num]);
+  el.innerHTML = makeSvgDigit(w, h, SEG_MAP[num], face === 'segment');
 }
 
 function setDigits(ids, str) {
@@ -1583,6 +2014,7 @@ function ensureClockTimer(mode) {
 }
 
 function tickClock() {
+  applyResolvedSky();
   ensureCalendar();
   const n = now();
   const state = morningState(n);
@@ -1800,36 +2232,89 @@ function buildWeekRows() {
 }
 
 const STORAGE_THEME = 'morning-board-theme';
+const STORAGE_FACE = 'morning-board-face';
+const STORAGE_SKY = 'morning-board-sky';
 
 const THEME_IDS = { fallout: 1, slate: 1, dusk: 1, ember: 1, bone: 1 };
+const FACE_IDS = { nixie: 1, segment: 1 };
+const SKY_LOCKS = { auto: 1, day: 1, night: 1 };
 
-function paintThemeButtons() {
-  const theme = THEME_IDS[document.documentElement.dataset.theme] === 1 ? document.documentElement.dataset.theme : 'fallout';
-  const buttons = document.querySelectorAll('[data-theme-choice]');
-  for (let i = 0; i < buttons.length; i++) {
-    buttons[i].classList.toggle('on', buttons[i].getAttribute('data-theme-choice') === theme);
+function applyResolvedSky() {
+  const root = document.documentElement;
+  const lock = root.getAttribute('data-sky-lock') || 'auto';
+  const showing = root.getAttribute('data-sky') === 'day' ? 'day' : 'night';
+  let next = showing;
+  if (lock === 'day' || lock === 'night') next = lock;
+  else {
+    let sun = null;
+    try { sun = JSON.parse(localStorage.getItem('morning-board-sun') || 'null'); } catch (e) {}
+    next = skyFromSun(new Date(), sun && sun.sunrise, sun && sun.sunset, showing);
   }
+  if (next !== showing) root.setAttribute('data-sky', next);
+}
+
+function paintPicks() {
+  const root = document.documentElement;
+  const face = FACE_IDS[root.getAttribute('data-face')] === 1 ? root.getAttribute('data-face') : '';
+  const lock = SKY_LOCKS[root.getAttribute('data-sky-lock')] === 1 ? root.getAttribute('data-sky-lock') : 'auto';
+  const theme = THEME_IDS[root.dataset.theme] === 1 ? root.dataset.theme : 'fallout';
+  const facePick = document.getElementById('facePick');
+  const skyPick = document.getElementById('skyPick');
+  const themePick = document.getElementById('themePick');
+  if (facePick) facePick.value = face;
+  if (skyPick) skyPick.value = lock;
+  if (themePick) themePick.value = theme;
+}
+
+function invalidateDigits() {
+  ['d0', 'd1', 'd2', 'd3'].forEach(function (id) {
+    const el = document.getElementById(id);
+    if (el) delete el.dataset.digit;
+  });
+}
+
+function chooseFace(face) {
+  if (face !== '' && FACE_IDS[face] !== 1) return;
+  const root = document.documentElement;
+  if (face) root.setAttribute('data-face', face);
+  else root.removeAttribute('data-face');
+  try { localStorage.setItem(STORAGE_FACE, face); } catch (e) {}
+  invalidateDigits();
+  paintPicks();
+  tickClock();
+}
+
+function chooseSky(lock) {
+  if (SKY_LOCKS[lock] !== 1) return;
+  document.documentElement.setAttribute('data-sky-lock', lock);
+  try { localStorage.setItem(STORAGE_SKY, lock); } catch (e) {}
+  applyResolvedSky();
+  paintPicks();
 }
 
 function chooseTheme(theme) {
   if (THEME_IDS[theme] !== 1) return;
   document.documentElement.dataset.theme = theme;
   try { localStorage.setItem(STORAGE_THEME, theme); } catch (e) {}
-  paintThemeButtons();
+  paintPicks();
 }
 
-paintThemeButtons();
-document.getElementById('themeRow').addEventListener('click', function (e) {
-  const btn = e.target.closest('[data-theme-choice]');
-  if (!btn) return;
-  chooseTheme(btn.getAttribute('data-theme-choice'));
+paintPicks();
+document.getElementById('facePick').addEventListener('change', function () {
+  chooseFace(this.value);
+});
+document.getElementById('skyPick').addEventListener('change', function () {
+  chooseSky(this.value);
+});
+document.getElementById('themePick').addEventListener('change', function () {
+  chooseTheme(this.value);
 });
 
 document.getElementById('gear').addEventListener('click', function () {
   buildWeekRows();
   populateLeaveInput(now());
   populateOneOff(new Date());
-  paintThemeButtons();
+  paintPicks();
   closeTimePad();
   sheetBg.classList.add('open');
 });
@@ -2122,7 +2607,7 @@ async function fetchWeather(lat, lon) {
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${useLat}&longitude=${useLon}`
       + `&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day`
       + `&hourly=temperature_2m`
-      + `&daily=temperature_2m_max,weather_code`
+      + `&daily=temperature_2m_max,weather_code,sunrise,sunset`
       + `&temperature_unit=fahrenheit&wind_speed_unit=mph`
       + `&timezone=auto&forecast_days=7&models=gfs_seamless`;
 
@@ -2160,6 +2645,16 @@ async function fetchWeather(lat, lon) {
     windEl.textContent  = `${wind}MPH`;
     humidEl.textContent = `${hum}%`;
     highEl.textContent  = `${todayHigh}°`;
+
+    if (daily.sunrise && daily.sunset && daily.sunrise[0] && daily.sunset[0]) {
+      try {
+        localStorage.setItem('morning-board-sun', JSON.stringify({
+          sunrise: daily.sunrise[0],
+          sunset: daily.sunset[0]
+        }));
+      } catch (e) {}
+      applyResolvedSky();
+    }
 
     // 5-day forecast — skip today (index 0), show next 5
     let fcHtml = '';
