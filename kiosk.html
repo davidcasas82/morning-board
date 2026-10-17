@@ -622,8 +622,8 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
   }
 
   #status-line .amber {
-    color: var(--emphasis);
-    text-shadow: var(--emphasis-shadow);
+    color: var(--digit);
+    text-shadow: none;
   }
 
   #leave-now {
@@ -685,6 +685,12 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
   body[data-mode="countdown"] #status-line,
   body[data-mode="late"] #status-line {
     font-size: clamp(28px, 4.5vw, 52px);
+    color: #f3efe6;
+  }
+
+  body[data-mode="countdown"] .gear,
+  body[data-mode="late"] .gear {
+    color: #d5d5d5;
   }
 
   body[data-mode="late"] #leave-now { display: flex; }
@@ -701,8 +707,10 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
 
   body[data-band="amber"] { --digit: #f0a04a; }
   body[data-band="orange"] { --digit: #ff7a2a; }
-  body[data-band="red"] { --digit: #ff2a2a; }
+  body[data-band="red"],
+  body[data-band="late"] { --digit: #ff2a2a; }
   body[data-band="red"] #status-line { color: #ff6a6a; }
+  body[data-mode="late"] #status-line { color: #ffe4e4; }
 
   body[data-band="red"] .digit-group,
   body[data-band="red"] .colon-sep,
@@ -727,10 +735,14 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
   /* Styles only change how a digit is drawn. Color is var(--digit).
      Segment draws lit bars only. Nixie fills the left column. */
   html[data-face="segment"] .digit-lg .digit-svg {
-    width: 14.6vw;
-    height: 23.6vw;
+    width: 13.4vw;
+    height: 21.6vw;
     max-width: none;
     max-height: none;
+  }
+
+  html[data-face="segment"] #ampm-indicator {
+    margin-left: 0.8vw;
   }
 
   html[data-face="segment"] .colon-sep {
@@ -798,7 +810,7 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
   }
 
   html[data-face="nixie"] .nix-wire.ghost {
-    opacity: 0.13;
+    opacity: 0.07;
     z-index: 1;
   }
 
