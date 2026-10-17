@@ -9,12 +9,13 @@
 /* Theme before first paint. ?theme= previews this load and does not save. */
 (function () {
   var theme = 'fallout';
+  var known = { fallout: 1, slate: 1, dusk: 1, ember: 1, bone: 1 };
   try {
     var q = new URLSearchParams(location.search).get('theme');
-    if (q === 'slate' || q === 'fallout') theme = q;
+    if (known[q] === 1) theme = q;
     else {
       var saved = localStorage.getItem('morning-board-theme');
-      if (saved === 'slate' || saved === 'fallout') theme = saved;
+      if (known[saved] === 1) theme = saved;
     }
   } catch (e) {}
   document.documentElement.setAttribute('data-theme', theme);
@@ -24,7 +25,7 @@
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-  /* Fallout is the default. Slate only overrides these tokens. */
+  /* Fallout is the default. Other themes only override these tokens. */
   html {
     --page-center: #1a1a0f;
     --page-mid: #0d0d00;
@@ -121,6 +122,150 @@
     --crt: 0;
   }
 
+  html[data-theme="dusk"] {
+    --page-center: #121a28;
+    --page-mid: #070b12;
+    --page-edge: #070b12;
+    --sheet: #141c2a;
+    --numpad: #141c2a;
+    --field: #070b12;
+    --button: #1a2434;
+    --seg-off: #222c3e;
+    --hairline: #3d4d66;
+    --hairline-soft: #3d4d66;
+    --hairline-strong: #3d4d66;
+    --hairline-button: #3d4d66;
+    --hairline-input: #3d4d66;
+    --divider-glow: none;
+    --panel-glow: none;
+    --text: #e8eef6;
+    --text-strong: #e8eef6;
+    --text-secondary: #c5d0e0;
+    --text-hint: #c5d0e0;
+    --text-muted: #9aabc0;
+    --text-faint: #9aabc0;
+    --text-day: #c5d0e0;
+    --text-header: #c5d0e0;
+    --text-fc: #9aabc0;
+    --digit: #d5e6fb;
+    --emphasis: #f2f7ff;
+    --ink: #121a28;
+    --font: 'IBM Plex Sans', sans-serif;
+    --seg-filter: none;
+    --colon-shadow: none;
+    --digit-shadow: none;
+    --text-shadow: none;
+    --emphasis-shadow: none;
+    --temp-shadow: none;
+    --today-shadow: none;
+    --high-shadow: none;
+    --detail-shadow: none;
+    --active-ring: 0 0 0 2px #3d4d66;
+    --icon-filter: none;
+    --fc-filter: none;
+    --gear: #9aabc0;
+    --arrow: #d5e6fb;
+    --barrel-radius: 0;
+    --barrel-shadow: none;
+    --crt: 0;
+  }
+
+  html[data-theme="ember"] {
+    --page-center: #1e1814;
+    --page-mid: #110e0c;
+    --page-edge: #110e0c;
+    --sheet: #1c1613;
+    --numpad: #1c1613;
+    --field: #110e0c;
+    --button: #2a211c;
+    --seg-off: #322820;
+    --hairline: #4a3d34;
+    --hairline-soft: #4a3d34;
+    --hairline-strong: #4a3d34;
+    --hairline-button: #4a3d34;
+    --hairline-input: #4a3d34;
+    --divider-glow: none;
+    --panel-glow: none;
+    --text: #f6efe8;
+    --text-strong: #f6efe8;
+    --text-secondary: #d8c8ba;
+    --text-hint: #d8c8ba;
+    --text-muted: #b09e90;
+    --text-faint: #b09e90;
+    --text-day: #d8c8ba;
+    --text-header: #d8c8ba;
+    --text-fc: #b09e90;
+    --digit: #f2b48a;
+    --emphasis: #ffd8be;
+    --ink: #1e1814;
+    --font: 'IBM Plex Sans', sans-serif;
+    --seg-filter: none;
+    --colon-shadow: none;
+    --digit-shadow: none;
+    --text-shadow: none;
+    --emphasis-shadow: none;
+    --temp-shadow: none;
+    --today-shadow: none;
+    --high-shadow: none;
+    --detail-shadow: none;
+    --active-ring: 0 0 0 2px #4a3d34;
+    --icon-filter: none;
+    --fc-filter: none;
+    --gear: #b09e90;
+    --arrow: #f2b48a;
+    --barrel-radius: 0;
+    --barrel-shadow: none;
+    --crt: 0;
+  }
+
+  html[data-theme="bone"] {
+    --page-center: #171717;
+    --page-mid: #0c0c0c;
+    --page-edge: #0c0c0c;
+    --sheet: #191919;
+    --numpad: #191919;
+    --field: #0c0c0c;
+    --button: #242424;
+    --seg-off: #2a2a2a;
+    --hairline: #404040;
+    --hairline-soft: #404040;
+    --hairline-strong: #404040;
+    --hairline-button: #404040;
+    --hairline-input: #404040;
+    --divider-glow: none;
+    --panel-glow: none;
+    --text: #f4f1ea;
+    --text-strong: #f4f1ea;
+    --text-secondary: #d4cfc6;
+    --text-hint: #d4cfc6;
+    --text-muted: #aaa49a;
+    --text-faint: #aaa49a;
+    --text-day: #d4cfc6;
+    --text-header: #d4cfc6;
+    --text-fc: #aaa49a;
+    --digit: #f7f3ea;
+    --emphasis: #fffaf3;
+    --ink: #171717;
+    --font: 'IBM Plex Sans', sans-serif;
+    --seg-filter: none;
+    --colon-shadow: none;
+    --digit-shadow: none;
+    --text-shadow: none;
+    --emphasis-shadow: none;
+    --temp-shadow: none;
+    --today-shadow: none;
+    --high-shadow: none;
+    --detail-shadow: none;
+    --active-ring: 0 0 0 2px #404040;
+    --icon-filter: none;
+    --fc-filter: none;
+    --gear: #aaa49a;
+    --arrow: #f7f3ea;
+    --barrel-radius: 0;
+    --barrel-shadow: none;
+    --crt: 0;
+  }
+
   html, body {
     width: 100%; height: 100%;
     background: radial-gradient(ellipse at center, var(--page-center) 0%, var(--page-mid) 55%, var(--page-edge) 100%);
@@ -161,8 +306,8 @@
     z-index: 99;
   }
 
-  html[data-theme="slate"] body::before,
-  html[data-theme="slate"] body::after {
+  html:not([data-theme="fallout"]) body::before,
+  html:not([data-theme="fallout"]) body::after {
     display: none;
   }
 
@@ -290,9 +435,9 @@
      Do not let the row shrink the shared idle box below 14.4vw × 23.3vw. */
   .digit-lg, .digit-sm { overflow: visible; flex: 0 0 auto; }
 
-  /* Lit segments. Fallout glows; Slate is flat amber. */
+  /* Lit segments. Fallout glows. Other themes are flat. */
   .seg-on  { fill: var(--digit); filter: var(--seg-filter); }
-  /* Unlit: recessed channel. Slate uses #222226 so segments stay visible. */
+  /* Unlit: recessed channel. Slate stays #222226. Other themes stay dark and visible. */
   .seg-off { fill: var(--seg-off); }
 
   /* overflow visible still needed so per-polygon glow bleeds outside viewBox */
@@ -355,7 +500,7 @@
     50%      { filter: drop-shadow(0 0 8px #33ff66ff) drop-shadow(0 0 24px #33ff6666); }
   }
 
-  html[data-theme="slate"] #weather-icon {
+  html:not([data-theme="fallout"]) #weather-icon {
     animation: none;
     filter: none;
   }
@@ -516,7 +661,7 @@
     letter-spacing: 0.05em;
   }
 
-  html[data-theme="slate"] .fc-high {
+  html:not([data-theme="fallout"]) .fc-high {
     color: var(--emphasis);
   }
 
@@ -623,23 +768,23 @@
   body[data-band="red"] #status-line { color: #ff6a6a; }
   body[data-band="red"] .colon-dot { animation: blink 1s ease-in-out infinite; }
 
-  html[data-theme="slate"] body[data-band="amber"] .seg-on,
-  html[data-theme="slate"] body[data-band="orange"] .seg-on,
-  html[data-theme="slate"] body[data-band="red"] .seg-on,
-  html[data-theme="slate"] .seg-on {
+  html:not([data-theme="fallout"]) body[data-band="amber"] .seg-on,
+  html:not([data-theme="fallout"]) body[data-band="orange"] .seg-on,
+  html:not([data-theme="fallout"]) body[data-band="red"] .seg-on,
+  html:not([data-theme="fallout"]) .seg-on {
     filter: none;
   }
 
-  html[data-theme="slate"] #ampm-indicator,
-  html[data-theme="slate"] #date-line,
-  html[data-theme="slate"] #date-line .amber,
-  html[data-theme="slate"] #status-line,
-  html[data-theme="slate"] #status-line .amber,
-  html[data-theme="slate"] #weather-temp,
-  html[data-theme="slate"] #weather-desc,
-  html[data-theme="slate"] .detail-value,
-  html[data-theme="slate"] .fc-high,
-  html[data-theme="slate"] #cal-header {
+  html:not([data-theme="fallout"]) #ampm-indicator,
+  html:not([data-theme="fallout"]) #date-line,
+  html:not([data-theme="fallout"]) #date-line .amber,
+  html:not([data-theme="fallout"]) #status-line,
+  html:not([data-theme="fallout"]) #status-line .amber,
+  html:not([data-theme="fallout"]) #weather-temp,
+  html:not([data-theme="fallout"]) #weather-desc,
+  html:not([data-theme="fallout"]) .detail-value,
+  html:not([data-theme="fallout"]) .fc-high,
+  html:not([data-theme="fallout"]) #cal-header {
     text-shadow: none;
   }
 
@@ -652,13 +797,13 @@
     50%, 100% { background: radial-gradient(ellipse at center, #1a1a0f 0%, #0a0a00 100%); }
   }
 
-  @keyframes lateflash-slate {
+  @keyframes lateflash-flat {
     0%, 49% { background: #3a0000; }
-    50%, 100% { background: #070708; }
+    50%, 100% { background: var(--page-edge); }
   }
 
-  html[data-theme="slate"] body[data-band="late"] {
-    animation-name: lateflash-slate;
+  html:not([data-theme="fallout"]) body[data-band="late"] {
+    animation-name: lateflash-flat;
   }
 
   .gear {
@@ -948,10 +1093,13 @@
     <h2>WEEK FROM GITHUB</h2>
     <p class="hint">Alarm and on-the-road times come from schedule.json. Change them in the repo (or ask Grok) and push. This tablet does not save a private week. Downstairs is 15 minutes before on-the-road. Off days never count down.</p>
     <h3>THEME</h3>
-    <p class="hint">Fallout stays the morning default until you pick Slate. This stays on the tablet. It does not change GitHub. A ?theme= link only previews this load.</p>
-    <div class="row">
-      <button type="button" id="themeFallout">Fallout</button>
-      <button type="button" id="themeSlate">Slate</button>
+    <p class="hint">Fallout stays the morning default until you pick another theme. This stays on the tablet. It does not change GitHub. A ?theme= link only previews this load.</p>
+    <div class="row" id="themeRow">
+      <button type="button" id="themeFallout" data-theme-choice="fallout">Fallout</button>
+      <button type="button" id="themeSlate" data-theme-choice="slate">Slate</button>
+      <button type="button" id="themeDusk" data-theme-choice="dusk">Dusk</button>
+      <button type="button" id="themeEmber" data-theme-choice="ember">Ember</button>
+      <button type="button" id="themeBone" data-theme-choice="bone">Bone</button>
     </div>
     <p class="hint" id="scheduleStatus">Loading week from GitHub…</p>
     <div class="week-head">
@@ -1653,21 +1801,29 @@ function buildWeekRows() {
 
 const STORAGE_THEME = 'morning-board-theme';
 
+const THEME_IDS = { fallout: 1, slate: 1, dusk: 1, ember: 1, bone: 1 };
+
 function paintThemeButtons() {
-  const theme = document.documentElement.dataset.theme === 'slate' ? 'slate' : 'fallout';
-  document.getElementById('themeFallout').classList.toggle('on', theme === 'fallout');
-  document.getElementById('themeSlate').classList.toggle('on', theme === 'slate');
+  const theme = THEME_IDS[document.documentElement.dataset.theme] === 1 ? document.documentElement.dataset.theme : 'fallout';
+  const buttons = document.querySelectorAll('[data-theme-choice]');
+  for (let i = 0; i < buttons.length; i++) {
+    buttons[i].classList.toggle('on', buttons[i].getAttribute('data-theme-choice') === theme);
+  }
 }
 
 function chooseTheme(theme) {
+  if (THEME_IDS[theme] !== 1) return;
   document.documentElement.dataset.theme = theme;
   try { localStorage.setItem(STORAGE_THEME, theme); } catch (e) {}
   paintThemeButtons();
 }
 
 paintThemeButtons();
-document.getElementById('themeFallout').addEventListener('click', function () { chooseTheme('fallout'); });
-document.getElementById('themeSlate').addEventListener('click', function () { chooseTheme('slate'); });
+document.getElementById('themeRow').addEventListener('click', function (e) {
+  const btn = e.target.closest('[data-theme-choice]');
+  if (!btn) return;
+  chooseTheme(btn.getAttribute('data-theme-choice'));
+});
 
 document.getElementById('gear').addEventListener('click', function () {
   buildWeekRows();
