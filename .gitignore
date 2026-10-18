@@ -3,3 +3,8 @@
 
 # Accidental browser downloads
 dashboard (*).html
+
+# Quote export and Google tokens stay off the repo
+quotes.json
+google-token.json
+oauth-client.json

@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-store">
 <title>Morning board</title>
-<script src="daily.js?v=18"></script>
+<script src="daily.js?v=19"></script>
+<script src="quotes.js?v=19"></script>
 <script>
 /* Style, day/night, and color before first paint.
    Each Pacific board day (local Pacific time minus 3 hours, from 3:00 AM)
@@ -103,6 +104,28 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
 </script>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500&family=Nixie+One&display=swap" rel="stylesheet">
 <style>
+  @font-face {
+    font-family: "IBM Plex Serif";
+    src: url("fonts/IBMPlexSerif-Regular.woff2") format("woff2");
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: "IBM Plex Serif";
+    src: url("fonts/IBMPlexSerif-Light.woff2") format("woff2");
+    font-weight: 300;
+    font-style: normal;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: "IBM Plex Sans";
+    src: url("fonts/IBMPlexSans-Regular.woff2") format("woff2");
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+  }
+
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   /* Slate is the default. A theme only sets these tokens.
@@ -1201,6 +1224,95 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
   }
 
   .hidden { display: none !important; }
+
+  #quote-screen {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    background: #14100d;
+    color: #f3e6da;
+    overflow: hidden;
+  }
+
+  body[data-quote="on"] {
+    background: #14100d;
+  }
+
+  body[data-quote="on"] #quote-screen {
+    display: block;
+  }
+
+  body[data-mode="countdown"] #quote-screen,
+  body[data-mode="late"] #quote-screen {
+    display: none !important;
+  }
+
+  body[data-quote="on"] .gear {
+    color: rgba(243, 230, 218, 0.45);
+  }
+
+  #quote-mark {
+    position: absolute;
+    left: 50%;
+    top: 0;
+    transform: translateX(-50%);
+    z-index: 0;
+    font-family: "IBM Plex Serif", serif;
+    font-weight: 300;
+    font-size: 640px;
+    line-height: 1;
+    color: rgba(243, 230, 218, 0.06);
+    pointer-events: none;
+  }
+
+  #quote-clock {
+    position: absolute;
+    top: 22px;
+    right: 88px;
+    z-index: 2;
+    font-family: "IBM Plex Sans", sans-serif;
+    font-weight: 400;
+    font-size: 34px;
+    line-height: 1;
+    letter-spacing: 0.03em;
+    color: rgba(243, 230, 218, 0.42);
+  }
+
+  #quote-body {
+    position: absolute;
+    left: 150px;
+    right: 150px;
+    top: 108px;
+    bottom: 92px;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    font-family: "IBM Plex Serif", serif;
+    color: #f3e6da;
+  }
+
+  #quote-body .quote-line {
+    max-width: 100%;
+    white-space: nowrap;
+  }
+
+  #quote-credit {
+    position: absolute;
+    left: 150px;
+    right: 150px;
+    bottom: 36px;
+    z-index: 2;
+    text-align: center;
+    font-family: "IBM Plex Sans", sans-serif;
+    font-weight: 400;
+    font-size: 22px;
+    line-height: 1.3;
+    color: #a89484;
+  }
 </style>
 </head>
 <body data-mode="clock" data-band="plenty">
@@ -1281,6 +1393,13 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
 
 </div>
 </div><!-- /barrel-wrap -->
+
+<div id="quote-screen" hidden>
+  <div id="quote-mark" aria-hidden="true">&ldquo;</div>
+  <div id="quote-clock"></div>
+  <div id="quote-body"></div>
+  <div id="quote-credit"></div>
+</div>
 
 <div class="sheet-bg" id="sheetBg">
   <div class="sheet" onclick="event.stopPropagation()">
@@ -1843,6 +1962,7 @@ function tickClock() {
 
   document.body.dataset.mode = state.mode;
   ensureClockTimer(state.mode);
+  applyQuoteScreen(n, state);
   document.getElementById('leave-now').textContent = 'LEAVE NOW';
 
   if (state.mode === 'clock') {
@@ -2663,6 +2783,428 @@ function initWeather() {
 
 initWeather();
 setInterval(() => fetchWeather(_weatherLat, _weatherLon), 10 * 60 * 1000);
+
+/* ================================================================
+   QUOTE SCREEN
+   Hours and the quotes URL live in board config. Countdown and late
+   stay on top. A failed fetch keeps the last good copy.
+   ================================================================ */
+var QUOTE_CACHE = 'morning-board-quotes-v1';
+var quoteConfig = (typeof MorningQuotes === 'object') ? MorningQuotes.configOf(MorningQuotes.DEFAULTS) : null;
+var quoteList = [];
+var quotePreview = null;
+var quoteRenderKey = '';
+
+function loadQuoteCache() {
+  try {
+    var raw = localStorage.getItem(QUOTE_CACHE);
+    if (!raw) return;
+    quoteList = MorningQuotes.normalize(JSON.parse(raw));
+  } catch (e) {
+    quoteList = [];
+  }
+}
+
+function rememberQuotes(data) {
+  try { localStorage.setItem(QUOTE_CACHE, JSON.stringify(data)); } catch (e) {}
+}
+
+function quoteInkContext() {
+  if (!quoteInkContext.ctx) {
+    quoteInkContext.ctx = document.createElement('canvas').getContext('2d');
+  }
+  return quoteInkContext.ctx;
+}
+
+/* Advance width ignores the serif ink that hangs past the em box.
+   actualBoundingBoxLeft/Right is that painted overhang. */
+function quoteLineMetrics(text, px, weight) {
+  var ctx = quoteInkContext();
+  ctx.font = weight + ' ' + px + 'px "IBM Plex Serif"';
+  var metrics = ctx.measureText(text);
+  var advance = metrics.width;
+  var left = typeof metrics.actualBoundingBoxLeft === 'number' ? metrics.actualBoundingBoxLeft : 0;
+  var right = typeof metrics.actualBoundingBoxRight === 'number' ? metrics.actualBoundingBoxRight : advance;
+  if (left < 0) left = 0;
+  if (right < advance) right = advance;
+  return { advance: advance, left: left, right: right };
+}
+
+function quoteFaceReady() {
+  if (!document.fonts || !document.fonts.check) return true;
+  return document.fonts.check('300 180px "IBM Plex Serif"') && document.fonts.check('400 60px "IBM Plex Serif"');
+}
+
+function ensureQuoteFace() {
+  if (!document.fonts || !document.fonts.load) return;
+  document.fonts.load('300 180px "IBM Plex Serif"');
+  document.fonts.load('400 60px "IBM Plex Serif"');
+  document.fonts.load('300 640px "IBM Plex Serif"');
+  document.fonts.load('400 34px "IBM Plex Sans"');
+}
+
+function quoteMarginLimit() {
+  return quoteConfig && quoteConfig.quoteMarginPx ? quoteConfig.quoteMarginPx : 150;
+}
+
+function lineClearsMargins(text, px, weight) {
+  var viewport = window.innerWidth || 1920;
+  var margin = quoteMarginLimit();
+  var metrics = quoteLineMetrics(text, px, weight);
+  var origin = (viewport - metrics.advance) / 2;
+  var inkLeft = origin - metrics.left;
+  var inkRight = origin + metrics.right;
+  return inkLeft >= margin - 0.5 && inkRight <= viewport - margin + 0.5;
+}
+
+function quoteBalancedLines(words, px, weight) {
+  var n = words.length;
+  if (!n) return null;
+  var maxLines = n;
+  var best = null;
+  var lines;
+  for (lines = 1; lines <= maxLines; lines++) {
+    var laid = quoteSplitLines(words, lines, px, weight);
+    if (laid) {
+      best = laid;
+      break;
+    }
+  }
+  return best;
+}
+
+function quoteSplitLines(words, lines, px, weight) {
+  var n = words.length;
+  var inf = 1e15;
+  var dp = [];
+  var prev = [];
+  var i;
+  var k;
+  var j;
+  for (i = 0; i <= n; i++) {
+    dp[i] = [];
+    prev[i] = [];
+    for (k = 0; k <= lines; k++) dp[i][k] = inf;
+  }
+  dp[0][0] = 0;
+  for (i = 0; i < n; i++) {
+    for (k = 0; k < lines; k++) {
+      if (dp[i][k] === inf) continue;
+      var j;
+      for (j = i + 1; j <= n; j++) {
+        var piece = words.slice(i, j).join(' ');
+        if (!lineClearsMargins(piece, px, weight)) break;
+        var width = quoteLineMetrics(piece, px, weight).advance;
+        var cost = dp[i][k] > width ? dp[i][k] : width;
+        if (cost < dp[j][k + 1]) {
+          dp[j][k + 1] = cost;
+          prev[j][k + 1] = i;
+        }
+      }
+    }
+  }
+  if (dp[n][lines] === inf) return null;
+  var out = [];
+  j = n;
+  for (k = lines; k >= 1; k--) {
+    i = prev[j][k];
+    out.push(words.slice(i, j).join(' '));
+    j = i;
+  }
+  out.reverse();
+  return out;
+}
+
+function quoteBox() {
+  var margin = quoteConfig && quoteConfig.quoteMarginPx ? quoteConfig.quoteMarginPx : 150;
+  return {
+    width: window.innerWidth - margin * 2,
+    height: window.innerHeight - 200
+  };
+}
+
+function layoutAt(text, px) {
+  if (!quoteConfig) return null;
+  var box = quoteBox();
+  if (box.width < 80 || box.height < 80) return null;
+  var words = String(text || '').trim().split(/\s+/);
+  var weight = px > 110 ? 300 : 400;
+  var laid = quoteBalancedLines(words, px, weight);
+  var lineHeight = Math.round(px * (px > 110 ? 1.16 : 1.28));
+  if (!laid || laid.length * lineHeight > box.height) return null;
+  var i;
+  for (i = 0; i < laid.length; i++) {
+    if (!lineClearsMargins(laid[i], px, weight)) return null;
+  }
+  return { lines: laid, px: px, weight: weight, lineHeight: lineHeight };
+}
+
+function quoteFit(text) {
+  if (!quoteConfig) return null;
+  var minPx = quoteConfig.quoteMinPx;
+  var maxPx = quoteConfig.quoteMaxPx;
+  var lo = minPx;
+  var hi = maxPx;
+  var best = null;
+  while (lo <= hi) {
+    var mid = Math.floor((lo + hi) / 2);
+    var laid = layoutAt(text, mid);
+    if (laid) {
+      best = laid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  /* The cap is not assumed to fit. Step down if the painted ink still crosses the margin. */
+  if (best && best.px === maxPx && !layoutAt(text, maxPx)) best = null;
+  return best;
+}
+
+function quoteFingerprint(text) {
+  var h = 2166136261;
+  var s = String(text || '');
+  var i;
+  for (i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(16);
+}
+
+function quoteCandidates(date) {
+  if (quotePreview) return [quotePreview];
+  if (!quoteList.length || typeof MorningQuotes !== 'object') return [];
+  var hit = MorningQuotes.quoteFor(date, quoteList, quoteConfig);
+  if (!hit) return [];
+  var plan = MorningQuotes.planFor(date, quoteList, quoteConfig);
+  var used = {};
+  var i;
+  for (i = 0; i < hit.slot && i < plan.length; i++) used[plan[i].index] = 1;
+  var order = [];
+  function pushIndex(index) {
+    if (used[index]) return;
+    if (!quoteList[index]) return;
+    order.push(quoteList[index]);
+    used[index] = 1;
+  }
+  pushIndex(hit.index);
+  for (i = hit.index + 1; i < quoteList.length; i++) pushIndex(i);
+  for (i = 0; i < hit.index; i++) pushIndex(i);
+  return order;
+}
+
+function paintQuote(quote, fit, when) {
+  var body = document.getElementById('quote-body');
+  var credit = document.getElementById('quote-credit');
+  var mark = document.getElementById('quote-mark');
+  var clock = document.getElementById('quote-clock');
+  var html = '';
+  var i;
+  for (i = 0; i < fit.lines.length; i++) {
+    html += '<div class="quote-line">' + fit.lines[i].replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</div>';
+  }
+  body.innerHTML = html;
+  body.style.fontSize = fit.px + 'px';
+  body.style.fontWeight = String(fit.weight);
+  body.style.lineHeight = fit.lineHeight + 'px';
+  credit.textContent = MorningQuotes.creditLine(quote);
+  clock.textContent = MorningQuotes.clockText(when);
+  placeQuoteMark();
+}
+
+function placeQuoteMark() {
+  var mark = document.getElementById('quote-mark');
+  var first = document.querySelector('#quote-body .quote-line');
+  if (!mark || !first) return;
+  var ctx = quoteInkContext();
+  var size = 640;
+  var guard;
+  var glyphH = 0;
+  for (guard = 0; guard < 6; guard++) {
+    ctx.font = '300 ' + size + 'px "IBM Plex Serif"';
+    var metrics = ctx.measureText('\u201C');
+    glyphH = (metrics.actualBoundingBoxAscent || 0) + (metrics.actualBoundingBoxDescent || 0);
+    if (glyphH < 1) break;
+    if (Math.abs(glyphH - 300) < 3) break;
+    size = size * (300 / glyphH);
+  }
+  mark.style.fontWeight = '300';
+  mark.style.fontSize = Math.round(size) + 'px';
+  mark.style.lineHeight = '1';
+  mark.style.color = 'rgba(243, 230, 218, 0.06)';
+  var lineTop = first.getBoundingClientRect().top;
+  var top = lineTop - 300 * 0.62;
+  if (top < 12) top = 12;
+  mark.style.top = Math.round(top) + 'px';
+  mark.style.left = '50%';
+  mark.style.transform = 'translateX(-50%)';
+}
+
+function renderedSideMargins() {
+  var body = document.getElementById('quote-body');
+  var lines = body ? body.querySelectorAll('.quote-line') : [];
+  var viewport = window.innerWidth;
+  var px = body ? parseFloat(body.style.fontSize) : 0;
+  var weight = body ? body.style.fontWeight : '400';
+  var left = Infinity;
+  var right = Infinity;
+  var i;
+  for (i = 0; i < lines.length; i++) {
+    var rect = lines[i].getBoundingClientRect();
+    var metrics = quoteLineMetrics(lines[i].textContent, px, weight);
+    var advance = rect.width > metrics.advance ? rect.width : metrics.advance;
+    var extraRight = metrics.right > metrics.advance ? metrics.right - metrics.advance : 0;
+    var inkLeft = rect.left - metrics.left;
+    var inkRight = rect.left + advance + extraRight;
+    if (inkLeft < left) left = inkLeft;
+    if (viewport - inkRight < right) right = viewport - inkRight;
+  }
+  return { left: left, right: right };
+}
+
+function applyQuoteScreen(when, state) {
+  var screen = document.getElementById('quote-screen');
+  if (!screen || !quoteConfig || typeof MorningQuotes !== 'object') return;
+  var clock = document.getElementById('quote-clock');
+  if (state.mode !== 'clock') {
+    document.body.dataset.quote = 'off';
+    screen.hidden = true;
+    return;
+  }
+  if (!quoteFaceReady()) {
+    ensureQuoteFace();
+    return;
+  }
+  var list = quoteCandidates(when);
+  if (!list.length) {
+    document.body.dataset.quote = 'off';
+    screen.hidden = true;
+    quoteRenderKey = '';
+    return;
+  }
+  var box = quoteBox();
+  var slotKey = quoteFingerprint(list[0].text) + ':' + box.width + ':' + box.height;
+  if (slotKey === quoteRenderKey) {
+    document.body.dataset.quote = 'on';
+    screen.hidden = false;
+    if (clock) clock.textContent = MorningQuotes.clockText(when);
+    return;
+  }
+  var chosen = null;
+  var fit = null;
+  var i;
+  for (i = 0; i < list.length; i++) {
+    fit = quoteFit(list[i].text);
+    if (fit) {
+      chosen = list[i];
+      break;
+    }
+  }
+  if (!chosen) {
+    document.body.dataset.quote = 'off';
+    screen.hidden = true;
+    quoteRenderKey = '';
+    return;
+  }
+  document.body.dataset.quote = 'on';
+  screen.hidden = false;
+  var guard = 0;
+  var margin = quoteMarginLimit();
+  while (fit && guard < 80) {
+    paintQuote(chosen, fit, when);
+    var gaps = renderedSideMargins();
+    if (gaps.left >= margin - 0.5 && gaps.right >= margin - 0.5) break;
+    fit = layoutAt(chosen.text, fit.px - 1);
+    guard++;
+  }
+  if (!fit) {
+    document.body.dataset.quote = 'off';
+    screen.hidden = true;
+    quoteRenderKey = '';
+    return;
+  }
+  quoteRenderKey = slotKey;
+}
+
+function fetchQuoteFile() {
+  if (!quoteConfig || !quoteConfig.quotesUrl) return;
+  fetch(quoteConfig.quotesUrl, { cache: 'no-store' })
+    .then(function (response) {
+      if (!response.ok) throw new Error('status');
+      return response.json();
+    })
+    .then(function (data) {
+      quoteList = MorningQuotes.normalize(data);
+      rememberQuotes(data);
+      quoteRenderKey = '';
+      tickClock();
+    })
+    .catch(function () {
+      /* Keep the last good copy already in quoteList. */
+    });
+}
+
+function applyBoardConfig(data) {
+  quoteConfig = MorningQuotes.configOf(data || {});
+  var margin = quoteConfig.quoteMarginPx;
+  var body = document.getElementById('quote-body');
+  var credit = document.getElementById('quote-credit');
+  if (body) {
+    body.style.left = margin + 'px';
+    body.style.right = margin + 'px';
+  }
+  if (credit) {
+    credit.style.left = margin + 'px';
+    credit.style.right = margin + 'px';
+  }
+  fetchQuoteFile();
+  quoteRenderKey = '';
+  tickClock();
+}
+
+function loadBoardConfig() {
+  fetch('board-config.json', { cache: 'no-store' })
+    .then(function (response) {
+      if (!response.ok) throw new Error('status');
+      return response.json();
+    })
+    .catch(function () {
+      return fetch('board-config.example.json', { cache: 'no-store' }).then(function (response) {
+        if (!response.ok) throw new Error('status');
+        return response.json();
+      });
+    })
+    .then(applyBoardConfig)
+    .catch(function () { applyBoardConfig(MorningQuotes.DEFAULTS); });
+}
+
+window.MorningBoardQuotePreview = function (text, credit) {
+  quotePreview = {
+    quote_date: '',
+    text: text,
+    excerpt_credit: credit || '',
+    word_count: 0,
+    source_url: ''
+  };
+  quoteRenderKey = '';
+  tickClock();
+};
+
+loadQuoteCache();
+loadBoardConfig();
+if (document.fonts) {
+  ensureQuoteFace();
+  document.fonts.ready.then(function () {
+    quoteRenderKey = '';
+    tickClock();
+  });
+  document.fonts.addEventListener('loadingdone', function () {
+    quoteRenderKey = '';
+    tickClock();
+  });
+}
+setInterval(fetchQuoteFile, 10 * 60 * 1000);
 </script>
 </body>
 </html>
