@@ -57,7 +57,7 @@ function nextOlder(index, count) {
 var example = JSON.parse(fs.readFileSync(path.join(__dirname, 'board-config.example.json'), 'utf8'));
 var config = quotes.configOf(example);
 
-assert.strictEqual(example.quotesUrl, '');
+assert.strictEqual(example.quotesUrl, '/quotes.json');
 assert.strictEqual(example.photosUrl, '');
 assert.strictEqual(config.quoteHours.weekday.start, '08:30');
 assert.strictEqual(config.quoteHours.weekday.end, '19:00');
