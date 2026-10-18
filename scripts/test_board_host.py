@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import http.client
 import importlib.util
 import json
 import plistlib
@@ -13,6 +14,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -124,9 +126,82 @@ class BoardHostTests(unittest.TestCase):
         self.assertNotIn("http://", json.dumps(example))
         self.assertNotIn("https://", example["quotesUrl"])
 
-    def test_server_port_is_not_the_quotes_only_port(self):
+    def test_server_port_is_8780(self):
         self.assertEqual(serve.PORT, 8780)
-        self.assertNotEqual(serve.PORT, 8765)
+
+    def test_only_board_files_are_served(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            root = directory / "checkout"
+            (root / "fonts").mkdir(parents=True)
+            (root / "scripts").mkdir()
+            allowed = {
+                "/": b"index page",
+                "/index.html": b"index page",
+                "/kiosk.html": b"kiosk page",
+                "/daily.js": b"daily script",
+                "/schedule.json": b'{"weekdays":{}}',
+                "/board-config.json": b'{"quotesUrl":"/quotes.json"}',
+                "/board-config.example.json": b'{"quotesUrl":"/quotes.json"}',
+                "/fonts/IBMPlexSans-Regular.woff2": b"woff2 bytes",
+                "/kiosk.html?v=19": b"kiosk page",
+                "/quotes.json": b'{"quotes":[]}',
+            }
+            for path, body in allowed.items():
+                name = urlsplit(path).path.lstrip("/") or "index.html"
+                if name != "quotes.json":
+                    (root / name).write_bytes(body)
+            quotes = directory / "quotes.json"
+            quotes.write_bytes(allowed["/quotes.json"])
+            for name in (
+                "google-token.json",
+                "oauth-client.json",
+                "secret.json",
+                ".env",
+                "notes.txt",
+                "quotes.json",
+                "scripts/serve-board.py",
+                "fonts/.hidden",
+            ):
+                (root / name).write_text("SECRET", encoding="utf-8")
+            (root / "fonts" / "nested").mkdir()
+            (root / "fonts" / "nested" / "x.woff2").write_text("SECRET", encoding="utf-8")
+            (directory / "outside.txt").write_text("SECRET", encoding="utf-8")
+            (root / "linked.js").symlink_to(directory / "outside.txt")
+            port = self.start(root, quotes)
+
+            def raw(path):
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                self.addCleanup(conn.close)
+                conn.request("GET", path)
+                response = conn.getresponse()
+                return response.status, response.read()
+
+            for path, body in allowed.items():
+                self.assertEqual(raw(path), (200, body), path)
+            for path in (
+                "/google-token.json",
+                "/oauth-client.json",
+                "/secret.json",
+                "/.env",
+                "/notes.txt",
+                "/scripts/serve-board.py",
+                "/fonts/.hidden",
+                "/fonts/nested/x.woff2",
+                "/fonts/",
+                "/scripts/",
+                "/favicon.ico",
+                "/linked.js",
+                "/../outside.txt",
+                "/fonts/../google-token.json",
+                "/%2e%2e/outside.txt",
+                "/%2E%2E%2Foutside.txt",
+                "/fonts%2f..%2fgoogle-token.json",
+                "/%252e%252e/outside.txt",
+                "/%2egit/config",
+                "/kiosk.html%00.js",
+            ):
+                self.assertEqual(raw(path), (404, b""), path)
 
     def test_board_jobs_are_user_launch_agents(self):
         board = plistlib.loads((ROOT / "launchd" / "com.davidcasas.morningboard.board.plist").read_bytes())

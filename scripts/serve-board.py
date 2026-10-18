@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Serve the morning board checkout on the LAN.
 
-Port 8780, separate from the quotes-only server on 8765. The checkout
-is read from disk on every request, so an HTML update does not need a
-restart. /quotes.json is the file outside the repo:
+Port 8780. Only the board's own files are served (see ALLOWED); every
+other path is a 404, so a token or config file dropped into the checkout
+never leaves the mini. The checkout is read from disk on every request,
+so an HTML update does not need a restart. /quotes.json is the file
+outside the repo:
 
     ~/Library/Application Support/morning-board/quotes.json
 
@@ -15,6 +17,7 @@ boot chime. Installing it does not change the frame's start URL.
 
 from __future__ import annotations
 
+import fnmatch
 import mimetypes
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,6 +27,14 @@ from urllib.parse import unquote, urlsplit
 PORT = 8780
 ROOT = Path(__file__).resolve().parents[1]
 QUOTES = Path.home() / "Library" / "Application Support" / "morning-board" / "quotes.json"
+ALLOWED = (
+    "index.html",
+    "kiosk.html",
+    "*.js",
+    "schedule.json",
+    "board-config*.json",
+    "fonts/*",
+)
 
 mimetypes.add_type("font/woff2", ".woff2")
 mimetypes.add_type("text/javascript", ".js")
@@ -39,16 +50,19 @@ def quotes_bytes(path: Path):
         return None
 
 
+def allowed(rel: str) -> bool:
+    depth = rel.count("/")
+    return any(pattern.count("/") == depth and fnmatch.fnmatchcase(rel, pattern) for pattern in ALLOWED)
+
+
 def static_file(root: Path, url_path: str):
-    """Map a URL path to a file inside root, or None."""
-    raw = unquote(url_path)
-    if raw.startswith("//") or "\\" in raw or "\x00" in raw:
+    """Map a URL path to an allowlisted file inside root, or None."""
+    rel = unquote(url_path).lstrip("/") or "index.html"
+    if "\\" in rel or "\x00" in rel:
         return None
-    rel = raw.lstrip("/")
-    if not rel or rel.endswith("/"):
-        rel = rel + "index.html"
-    parts = Path(rel).parts
-    if not parts or any(part in ("", ".", "..") or part.startswith(".") for part in parts):
+    if any(part in ("", ".", "..") or part.startswith(".") for part in rel.split("/")):
+        return None
+    if not allowed(rel):
         return None
     root = root.resolve()
     candidate = (root / rel).resolve()
@@ -56,8 +70,6 @@ def static_file(root: Path, url_path: str):
         candidate.relative_to(root)
     except ValueError:
         return None
-    if candidate.is_dir():
-        candidate = candidate / "index.html"
     if not candidate.is_file():
         return None
     return candidate
