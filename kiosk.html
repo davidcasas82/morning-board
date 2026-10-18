@@ -1229,7 +1229,8 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
      Lettering is --text so it stays readable on that field, including bone day
      (white) and every night. --ink sits on the digits (white by day, near-black
      at night) and would disappear here. Mark, clock, credit, and gear are that
-     same lettering at a lower alpha. Alphas stay high enough to read on the
+     same lettering at a lower opacity (not color-mix: the frame's WebView 106
+     predates it). Alphas stay high enough to read on the
      lightest day field (slate). The mark is a watermark. */
   #quote-screen {
     display: none;
@@ -1255,7 +1256,8 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
   }
 
   body[data-quote="on"] .gear {
-    color: color-mix(in srgb, var(--text) 62%, transparent);
+    color: var(--text);
+    opacity: 0.62;
   }
 
   #quote-mark {
@@ -1268,7 +1270,8 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
     font-weight: 300;
     font-size: 640px;
     line-height: 1;
-    color: color-mix(in srgb, var(--text) 6%, transparent);
+    color: var(--text);
+    opacity: 0.06;
     pointer-events: none;
   }
 
@@ -1282,7 +1285,8 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
     font-size: 34px;
     line-height: 1;
     letter-spacing: 0.03em;
-    color: color-mix(in srgb, var(--text) 62%, transparent);
+    color: var(--text);
+    opacity: 0.62;
   }
 
   #quote-body {
@@ -1317,7 +1321,8 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
     font-weight: 400;
     font-size: 22px;
     line-height: 1.3;
-    color: color-mix(in srgb, var(--text) 78%, transparent);
+    color: var(--text);
+    opacity: 0.78;
   }
 </style>
 </head>
