@@ -2,14 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Morning board static host, port 8780.
-  LaunchDaemon, not a LaunchAgent: it can start at boot with no user logged in.
-  Replace __REPO__ and __HOME__, then copy this file to /Library/LaunchDaemons/
-  (not ~/Library/LaunchAgents/) and run:
-    sudo launchctl bootstrap system /Library/LaunchDaemons/com.davidcasas.morningboard.board.plist
+  User LaunchAgent for ~/Library/LaunchAgents/. Replace __REPO__ and __HOME__.
+  No sudo. From the mini account:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davidcasas.morningboard.board.plist
+  A user agent starts after login, not at the boot chime. Auto-login for
+  casasmacmini-server is a dependency.
   This does not change the frame's start URL. Leave the frame on GitHub Pages.
   /quotes.json is __HOME__/Library/Application Support/morning-board/quotes.json.
-  Optional: set UserName to the mini account (casasmacmini-server) before bootstrap
-  so the process is not root. The quotes path above does not depend on that.
 -->
 <plist version="1.0">
 <dict>

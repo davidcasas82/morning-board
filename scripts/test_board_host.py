@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import plistlib
 import subprocess
 import tempfile
 import threading
@@ -126,6 +127,24 @@ class BoardHostTests(unittest.TestCase):
     def test_server_port_is_not_the_quotes_only_port(self):
         self.assertEqual(serve.PORT, 8780)
         self.assertNotEqual(serve.PORT, 8765)
+
+    def test_board_jobs_are_user_launch_agents(self):
+        board = plistlib.loads((ROOT / "launchd" / "com.davidcasas.morningboard.board.plist").read_bytes())
+        pull_job = plistlib.loads((ROOT / "launchd" / "com.davidcasas.morningboard.board-pull.plist").read_bytes())
+        self.assertTrue(board["RunAtLoad"])
+        self.assertTrue(board["KeepAlive"])
+        self.assertTrue(pull_job["RunAtLoad"])
+        self.assertEqual(pull_job["StartInterval"], 900)
+        self.assertNotIn("KeepAlive", pull_job)
+        for name in (
+            "com.davidcasas.morningboard.board.plist",
+            "com.davidcasas.morningboard.board-pull.plist",
+        ):
+            text = (ROOT / "launchd" / name).read_text(encoding="utf-8")
+            self.assertIn("~/Library/LaunchAgents/", text)
+            self.assertNotIn("LaunchDaemon", text)
+            self.assertNotIn("sudo launchctl", text)
+            self.assertNotIn("/Library/LaunchDaemons/", text)
 
 
 if __name__ == "__main__":

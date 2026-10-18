@@ -1,16 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Fast-forward the morning board checkout every 15 minutes, and at boot.
-  LaunchDaemon, not a LaunchAgent: it can start at boot with no user logged in.
-  Replace __REPO__ and __HOME__, then copy this file to /Library/LaunchDaemons/
-  and run:
-    sudo launchctl bootstrap system /Library/LaunchDaemons/com.davidcasas.morningboard.board-pull.plist
+  Fast-forward the morning board checkout every 15 minutes, and at login.
+  User LaunchAgent for ~/Library/LaunchAgents/. Replace __REPO__ and __HOME__.
+  No sudo. From the mini account:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davidcasas.morningboard.board-pull.plist
+  A user agent starts after login, not at the boot chime. Auto-login for
+  casasmacmini-server is a dependency.
   Fast-forward only. If the pull fails, the files already on disk stay.
   HTML updates do not need the server on port 8780 to restart.
   This does not change the frame's start URL.
-  Optional: set UserName to the mini account (casasmacmini-server) so git
-  writes stay with that user.
 -->
 <plist version="1.0">
 <dict>

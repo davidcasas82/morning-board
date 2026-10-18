@@ -16,17 +16,17 @@ The page requests same-origin `/quotes.json`. On GitHub Pages that URL 404s, the
 
 This does not change the frame's start URL. Leave the frame on [the Pages board](https://davidcasas82.github.io/morning-board/) until you change it by hand.
 
-The server reads files from disk, so HTML updates do not need a restart. A second LaunchDaemon runs `git pull --ff-only` every 15 minutes and at boot. If the pull fails, the files already on disk stay.
+The server reads files from disk, so HTML updates do not need a restart. A second LaunchAgent runs `git pull --ff-only` every 15 minutes and at login. If the pull fails, the files already on disk stay.
 
-Both jobs are LaunchDaemons. They can start at boot with no user logged in. Cloning the repo does not install them.
+Both jobs are user LaunchAgents in `~/Library/LaunchAgents/`. A user agent starts after login, not at the boot chime, so auto-login for `casasmacmini-server` is a dependency. Install does not use sudo. Cloning the repo does not install them.
 
 1. Replace `__REPO__` and `__HOME__` in `launchd/com.davidcasas.morningboard.board.plist` and `launchd/com.davidcasas.morningboard.board-pull.plist`.
-2. Copy both files to `/Library/LaunchDaemons/` (not `~/Library/LaunchAgents/`).
-3. Bootstrap them:
+2. Copy both files to `~/Library/LaunchAgents/`.
+3. As `casasmacmini-server`, bootstrap them:
 
 ```
-sudo launchctl bootstrap system /Library/LaunchDaemons/com.davidcasas.morningboard.board.plist
-sudo launchctl bootstrap system /Library/LaunchDaemons/com.davidcasas.morningboard.board-pull.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davidcasas.morningboard.board.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davidcasas.morningboard.board-pull.plist
 ```
 
 From another machine on the LAN, open `http://<mini>:8780/`. The CSV sync LaunchAgent is unchanged.

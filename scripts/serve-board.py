@@ -8,9 +8,9 @@ restart. /quotes.json is the file outside the repo:
     ~/Library/Application Support/morning-board/quotes.json
 
 A missing quotes file is a 404. The server stays up and the clock page
-still loads. This process is meant to run as a LaunchDaemon so it can
-start at boot with nobody logged in. Installing it does not change the
-frame's start URL.
+still loads. Run it as a user LaunchAgent. It starts after
+casasmacmini-server logs in, which depends on auto-login, not at the
+boot chime. Installing it does not change the frame's start URL.
 """
 
 from __future__ import annotations
