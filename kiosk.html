@@ -1255,14 +1255,14 @@ function skyFromSun(now, sunriseIso, sunsetIso, showing) {
   #quote-mark {
     position: absolute;
     left: 50%;
-    top: 8%;
+    top: 0;
     transform: translateX(-50%);
     z-index: 0;
     font-family: "IBM Plex Serif", serif;
     font-weight: 300;
-    font-size: 280px;
-    line-height: 0.8;
-    color: rgba(243, 230, 218, 0.07);
+    font-size: 640px;
+    line-height: 1;
+    color: rgba(243, 230, 218, 0.06);
     pointer-events: none;
   }
 
@@ -2809,33 +2809,62 @@ function rememberQuotes(data) {
   try { localStorage.setItem(QUOTE_CACHE, JSON.stringify(data)); } catch (e) {}
 }
 
-function quoteMeasure(text, px, weight) {
-  var probe = document.getElementById('quote-probe');
-  if (!probe) {
-    probe = document.createElement('div');
-    probe.id = 'quote-probe';
-    probe.style.position = 'absolute';
-    probe.style.left = '-9999px';
-    probe.style.top = '0';
-    probe.style.whiteSpace = 'nowrap';
-    probe.style.visibility = 'hidden';
-    probe.style.fontFamily = '"IBM Plex Serif", serif';
-    document.body.appendChild(probe);
+function quoteInkContext() {
+  if (!quoteInkContext.ctx) {
+    quoteInkContext.ctx = document.createElement('canvas').getContext('2d');
   }
-  probe.style.fontSize = px + 'px';
-  probe.style.fontWeight = String(weight);
-  probe.textContent = text;
-  return probe.scrollWidth;
+  return quoteInkContext.ctx;
 }
 
-function quoteBalancedLines(words, px, weight, maxWidth) {
+/* Advance width ignores the serif ink that hangs past the em box.
+   actualBoundingBoxLeft/Right is that painted overhang. */
+function quoteLineMetrics(text, px, weight) {
+  var ctx = quoteInkContext();
+  ctx.font = weight + ' ' + px + 'px "IBM Plex Serif"';
+  var metrics = ctx.measureText(text);
+  var advance = metrics.width;
+  var left = typeof metrics.actualBoundingBoxLeft === 'number' ? metrics.actualBoundingBoxLeft : 0;
+  var right = typeof metrics.actualBoundingBoxRight === 'number' ? metrics.actualBoundingBoxRight : advance;
+  if (left < 0) left = 0;
+  if (right < advance) right = advance;
+  return { advance: advance, left: left, right: right };
+}
+
+function quoteFaceReady() {
+  if (!document.fonts || !document.fonts.check) return true;
+  return document.fonts.check('300 180px "IBM Plex Serif"') && document.fonts.check('400 60px "IBM Plex Serif"');
+}
+
+function ensureQuoteFace() {
+  if (!document.fonts || !document.fonts.load) return;
+  document.fonts.load('300 180px "IBM Plex Serif"');
+  document.fonts.load('400 60px "IBM Plex Serif"');
+  document.fonts.load('300 640px "IBM Plex Serif"');
+  document.fonts.load('400 34px "IBM Plex Sans"');
+}
+
+function quoteMarginLimit() {
+  return quoteConfig && quoteConfig.quoteMarginPx ? quoteConfig.quoteMarginPx : 150;
+}
+
+function lineClearsMargins(text, px, weight) {
+  var viewport = window.innerWidth || 1920;
+  var margin = quoteMarginLimit();
+  var metrics = quoteLineMetrics(text, px, weight);
+  var origin = (viewport - metrics.advance) / 2;
+  var inkLeft = origin - metrics.left;
+  var inkRight = origin + metrics.right;
+  return inkLeft >= margin - 0.5 && inkRight <= viewport - margin + 0.5;
+}
+
+function quoteBalancedLines(words, px, weight) {
   var n = words.length;
   if (!n) return null;
-  var maxLines = Math.min(n, 24);
+  var maxLines = n;
   var best = null;
   var lines;
   for (lines = 1; lines <= maxLines; lines++) {
-    var laid = quoteSplitLines(words, lines, px, weight, maxWidth);
+    var laid = quoteSplitLines(words, lines, px, weight);
     if (laid) {
       best = laid;
       break;
@@ -2844,7 +2873,7 @@ function quoteBalancedLines(words, px, weight, maxWidth) {
   return best;
 }
 
-function quoteSplitLines(words, lines, px, weight, maxWidth) {
+function quoteSplitLines(words, lines, px, weight) {
   var n = words.length;
   var inf = 1e15;
   var dp = [];
@@ -2863,8 +2892,9 @@ function quoteSplitLines(words, lines, px, weight, maxWidth) {
       if (dp[i][k] === inf) continue;
       var j;
       for (j = i + 1; j <= n; j++) {
-        var width = quoteMeasure(words.slice(i, j).join(' '), px, weight);
-        if (width > maxWidth) break;
+        var piece = words.slice(i, j).join(' ');
+        if (!lineClearsMargins(piece, px, weight)) break;
+        var width = quoteLineMetrics(piece, px, weight).advance;
         var cost = dp[i][k] > width ? dp[i][k] : width;
         if (cost < dp[j][k + 1]) {
           dp[j][k + 1] = cost;
@@ -2893,13 +2923,24 @@ function quoteBox() {
   };
 }
 
-function quoteFit(text) {
+function layoutAt(text, px) {
   if (!quoteConfig) return null;
   var box = quoteBox();
-  var maxWidth = box.width;
-  var maxHeight = box.height;
-  if (maxWidth < 80 || maxHeight < 80) return null;
+  if (box.width < 80 || box.height < 80) return null;
   var words = String(text || '').trim().split(/\s+/);
+  var weight = px > 110 ? 300 : 400;
+  var laid = quoteBalancedLines(words, px, weight);
+  var lineHeight = Math.round(px * (px > 110 ? 1.16 : 1.28));
+  if (!laid || laid.length * lineHeight > box.height) return null;
+  var i;
+  for (i = 0; i < laid.length; i++) {
+    if (!lineClearsMargins(laid[i], px, weight)) return null;
+  }
+  return { lines: laid, px: px, weight: weight, lineHeight: lineHeight };
+}
+
+function quoteFit(text) {
+  if (!quoteConfig) return null;
   var minPx = quoteConfig.quoteMinPx;
   var maxPx = quoteConfig.quoteMaxPx;
   var lo = minPx;
@@ -2907,16 +2948,16 @@ function quoteFit(text) {
   var best = null;
   while (lo <= hi) {
     var mid = Math.floor((lo + hi) / 2);
-    var weight = mid > 110 ? 300 : 400;
-    var laid = quoteBalancedLines(words, mid, weight, maxWidth);
-    var lineHeight = Math.round(mid * (mid > 110 ? 1.16 : 1.28));
-    if (laid && laid.length * lineHeight <= maxHeight) {
-      best = { lines: laid, px: mid, weight: weight, lineHeight: lineHeight };
+    var laid = layoutAt(text, mid);
+    if (laid) {
+      best = laid;
       lo = mid + 1;
     } else {
       hi = mid - 1;
     }
   }
+  /* The cap is not assumed to fit. Step down if the painted ink still crosses the margin. */
+  if (best && best.px === maxPx && !layoutAt(text, maxPx)) best = null;
   return best;
 }
 
@@ -2969,7 +3010,57 @@ function paintQuote(quote, fit, when) {
   body.style.lineHeight = fit.lineHeight + 'px';
   credit.textContent = MorningQuotes.creditLine(quote);
   clock.textContent = MorningQuotes.clockText(when);
-  mark.style.fontSize = Math.round(Math.min(320, Math.max(140, fit.px * 2.4))) + 'px';
+  placeQuoteMark();
+}
+
+function placeQuoteMark() {
+  var mark = document.getElementById('quote-mark');
+  var first = document.querySelector('#quote-body .quote-line');
+  if (!mark || !first) return;
+  var ctx = quoteInkContext();
+  var size = 640;
+  var guard;
+  var glyphH = 0;
+  for (guard = 0; guard < 6; guard++) {
+    ctx.font = '300 ' + size + 'px "IBM Plex Serif"';
+    var metrics = ctx.measureText('\u201C');
+    glyphH = (metrics.actualBoundingBoxAscent || 0) + (metrics.actualBoundingBoxDescent || 0);
+    if (glyphH < 1) break;
+    if (Math.abs(glyphH - 300) < 3) break;
+    size = size * (300 / glyphH);
+  }
+  mark.style.fontWeight = '300';
+  mark.style.fontSize = Math.round(size) + 'px';
+  mark.style.lineHeight = '1';
+  mark.style.color = 'rgba(243, 230, 218, 0.06)';
+  var lineTop = first.getBoundingClientRect().top;
+  var top = lineTop - 300 * 0.62;
+  if (top < 12) top = 12;
+  mark.style.top = Math.round(top) + 'px';
+  mark.style.left = '50%';
+  mark.style.transform = 'translateX(-50%)';
+}
+
+function renderedSideMargins() {
+  var body = document.getElementById('quote-body');
+  var lines = body ? body.querySelectorAll('.quote-line') : [];
+  var viewport = window.innerWidth;
+  var px = body ? parseFloat(body.style.fontSize) : 0;
+  var weight = body ? body.style.fontWeight : '400';
+  var left = Infinity;
+  var right = Infinity;
+  var i;
+  for (i = 0; i < lines.length; i++) {
+    var rect = lines[i].getBoundingClientRect();
+    var metrics = quoteLineMetrics(lines[i].textContent, px, weight);
+    var advance = rect.width > metrics.advance ? rect.width : metrics.advance;
+    var extraRight = metrics.right > metrics.advance ? metrics.right - metrics.advance : 0;
+    var inkLeft = rect.left - metrics.left;
+    var inkRight = rect.left + advance + extraRight;
+    if (inkLeft < left) left = inkLeft;
+    if (viewport - inkRight < right) right = viewport - inkRight;
+  }
+  return { left: left, right: right };
 }
 
 function applyQuoteScreen(when, state) {
@@ -2979,6 +3070,10 @@ function applyQuoteScreen(when, state) {
   if (state.mode !== 'clock') {
     document.body.dataset.quote = 'off';
     screen.hidden = true;
+    return;
+  }
+  if (!quoteFaceReady()) {
+    ensureQuoteFace();
     return;
   }
   var list = quoteCandidates(when);
@@ -3014,8 +3109,22 @@ function applyQuoteScreen(when, state) {
   }
   document.body.dataset.quote = 'on';
   screen.hidden = false;
+  var guard = 0;
+  var margin = quoteMarginLimit();
+  while (fit && guard < 80) {
+    paintQuote(chosen, fit, when);
+    var gaps = renderedSideMargins();
+    if (gaps.left >= margin - 0.5 && gaps.right >= margin - 0.5) break;
+    fit = layoutAt(chosen.text, fit.px - 1);
+    guard++;
+  }
+  if (!fit) {
+    document.body.dataset.quote = 'off';
+    screen.hidden = true;
+    quoteRenderKey = '';
+    return;
+  }
   quoteRenderKey = slotKey;
-  paintQuote(chosen, fit, when);
 }
 
 function fetchQuoteFile() {
@@ -3084,6 +3193,17 @@ window.MorningBoardQuotePreview = function (text, credit) {
 
 loadQuoteCache();
 loadBoardConfig();
+if (document.fonts) {
+  ensureQuoteFace();
+  document.fonts.ready.then(function () {
+    quoteRenderKey = '';
+    tickClock();
+  });
+  document.fonts.addEventListener('loadingdone', function () {
+    quoteRenderKey = '';
+    tickClock();
+  });
+}
 setInterval(fetchQuoteFile, 10 * 60 * 1000);
 </script>
 </body>
