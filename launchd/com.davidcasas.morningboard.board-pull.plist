@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Fast-forward the morning board checkout every 15 minutes, and at login.
+  User LaunchAgent for ~/Library/LaunchAgents/. Replace __REPO__ and __HOME__.
+  No sudo. From the mini account:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davidcasas.morningboard.board-pull.plist
+  A user agent starts after login, not at the boot chime. Auto-login for
+  casasmacmini-server is a dependency.
+  Fast-forward only. If the pull fails, the files already on disk stay.
+  HTML updates do not need the server on port 8780 to restart.
+  This does not change the frame's start URL.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.davidcasas.morningboard.board-pull</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__REPO__/scripts/pull-board.py</string>
+    <string>--repo</string>
+    <string>__REPO__</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/morning-board-board-pull.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/morning-board-board-pull.err</string>
+</dict>
+</plist>
