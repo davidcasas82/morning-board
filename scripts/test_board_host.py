@@ -7,6 +7,7 @@ import http.client
 import importlib.util
 import json
 import plistlib
+import re
 import subprocess
 import tempfile
 import threading
@@ -125,6 +126,17 @@ class BoardHostTests(unittest.TestCase):
         self.assertEqual(example["quotesUrl"], "/quotes.json")
         self.assertNotIn("http://", json.dumps(example))
         self.assertNotIn("https://", example["quotesUrl"])
+
+    def test_page_avoids_color_syntax_newer_than_webview_106(self):
+        newer = ("color-mix(", "rgb(from", "hsl(from", "oklch(", "oklab(", "lab(", "lch(", "color(display-p3")
+        pages = [ROOT / "kiosk.html", ROOT / "index.html"] + sorted(ROOT.glob("*.js"))
+        found = [
+            (page.name, token)
+            for page in pages
+            for token in newer
+            if re.search(r"(?<![\w-])" + re.escape(token), page.read_text(encoding="utf-8"), re.IGNORECASE)
+        ]
+        self.assertEqual(found, [])
 
     def test_server_port_is_8780(self):
         self.assertEqual(serve.PORT, 8780)
