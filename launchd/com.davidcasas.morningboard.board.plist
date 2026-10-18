@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Morning board static host, port 8780.
+  LaunchDaemon, not a LaunchAgent: it can start at boot with no user logged in.
+  Replace __REPO__ and __HOME__, then copy this file to /Library/LaunchDaemons/
+  (not ~/Library/LaunchAgents/) and run:
+    sudo launchctl bootstrap system /Library/LaunchDaemons/com.davidcasas.morningboard.board.plist
+  This does not change the frame's start URL. Leave the frame on GitHub Pages.
+  /quotes.json is __HOME__/Library/Application Support/morning-board/quotes.json.
+  Optional: set UserName to the mini account (casasmacmini-server) before bootstrap
+  so the process is not root. The quotes path above does not depend on that.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.davidcasas.morningboard.board</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__REPO__/scripts/serve-board.py</string>
+    <string>--root</string>
+    <string>__REPO__</string>
+    <string>--quotes</string>
+    <string>__HOME__/Library/Application Support/morning-board/quotes.json</string>
+    <string>--port</string>
+    <string>8780</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/morning-board-board.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/morning-board-board.err</string>
+</dict>
+</plist>

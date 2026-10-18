@@ -1,6 +1,6 @@
 {
   "timezone": "America/Los_Angeles",
-  "quotesUrl": "",
+  "quotesUrl": "/quotes.json",
   "photosUrl": "",
   "quoteMinutes": 60,
   "quoteMinPx": 32,
