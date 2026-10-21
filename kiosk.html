@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-store">
 <title>Morning board</title>
 <script src="daily.js?v=19"></script>
-<script src="quotes.js?v=19"></script>
+<script src="quotes.js?v=20"></script>
 <script>
 /* Style, day/night, and color before first paint.
    Each Pacific board day (local Pacific time minus 3 hours, from 3:00 AM)
@@ -2988,20 +2988,9 @@ function quoteCandidates(date) {
   if (!quoteList.length || typeof MorningQuotes !== 'object') return [];
   var hit = MorningQuotes.quoteFor(date, quoteList, quoteConfig);
   if (!hit) return [];
-  var plan = MorningQuotes.planFor(date, quoteList, quoteConfig);
-  var used = {};
-  var i;
-  for (i = 0; i < hit.slot && i < plan.length; i++) used[plan[i].index] = 1;
   var order = [];
-  function pushIndex(index) {
-    if (used[index]) return;
-    if (!quoteList[index]) return;
-    order.push(quoteList[index]);
-    used[index] = 1;
-  }
-  pushIndex(hit.index);
-  for (i = hit.index + 1; i < quoteList.length; i++) pushIndex(i);
-  for (i = 0; i < hit.index; i++) pushIndex(i);
+  var i;
+  for (i = 0; i < quoteList.length; i++) order.push(quoteList[(hit.index + i) % quoteList.length]);
   return order;
 }
 
