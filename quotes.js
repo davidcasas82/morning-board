@@ -1,16 +1,14 @@
 /* Quote rotation for the morning board.
    Hours come from config. Slot count is the 60-minute slices that fit
    between start and end. Pacific wall time, America/Los_Angeles.
-   First slot of a day is the newest quote. Later slots walk older quotes
-   and do not repeat. The next day starts at the newest again, then
-   continues through older quotes that were not used on earlier days.
-   When that list is exhausted, it wraps. Same instant, same quote. */
+   Slots are numbered across days, so the last slot of one day is next to
+   the first slot of the next. Each run of n slots shows a seeded shuffle
+   of all n quotes. Same instant, same quote, with no state to keep. */
 (function (root, factory) {
   var api = factory();
   if (typeof module === 'object' && module.exports) module.exports = api;
   root.MorningQuotes = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
-  var EPOCH = '2020-01-01';
   var DEFAULTS = {
     timezone: 'America/Los_Angeles',
     quotesUrl: '',
@@ -19,7 +17,6 @@
     quoteMinPx: 32,
     quoteMaxPx: 180,
     quoteMarginPx: 150,
-    epoch: EPOCH,
     quoteHours: {
       weekday: { start: '08:30', end: '19:00' },
       weekend: { start: '09:00', end: '21:00' }
@@ -40,17 +37,15 @@
     return dt.getUTCFullYear() + '-' + pad2(dt.getUTCMonth() + 1) + '-' + pad2(dt.getUTCDate());
   }
 
-  function validYmd(ymd) {
+  var DAY_MS = 86400000;
+
+  function dayNumber(ymd) {
     var p = parseYmd(ymd);
-    if (!p || p.mo < 1 || p.mo > 12 || p.d < 1 || p.d > 31) return false;
-    var dt = new Date(Date.UTC(p.y, p.mo - 1, p.d));
-    return dt.getUTCFullYear() === p.y && dt.getUTCMonth() === p.mo - 1 && dt.getUTCDate() === p.d;
+    return Math.floor(Date.UTC(p.y, p.mo - 1, p.d) / DAY_MS);
   }
 
-  function addDays(ymd, days) {
-    var p = parseYmd(ymd);
-    if (!p) return ymd;
-    return ymdFromUtc(new Date(Date.UTC(p.y, p.mo - 1, p.d + days)));
+  function ymdOfDay(day) {
+    return ymdFromUtc(new Date(day * DAY_MS));
   }
 
   function weekdayIndex(ymd) {
@@ -87,7 +82,6 @@
       quoteMinPx: src.quoteMinPx > 0 ? src.quoteMinPx : DEFAULTS.quoteMinPx,
       quoteMaxPx: src.quoteMaxPx > 0 ? src.quoteMaxPx : DEFAULTS.quoteMaxPx,
       quoteMarginPx: src.quoteMarginPx > 0 ? src.quoteMarginPx : DEFAULTS.quoteMarginPx,
-      epoch: validYmd(src.epoch) ? src.epoch : DEFAULTS.epoch,
       quoteHours: {
         weekday: { start: weekday.start, end: weekday.end },
         weekend: { start: weekend.start, end: weekend.end }
@@ -158,73 +152,45 @@
     return idx;
   }
 
-  function advanceForDay(ymd, olderLen, config) {
-    var extra = Math.max(0, slotsOn(ymd, config) - 1);
-    if (olderLen <= 0) return 0;
-    return Math.min(extra, olderLen);
-  }
-
-  function continuationBefore(ymd, olderLen, config) {
-    var cfg = configOf(config);
-    if (olderLen <= 0 || !validYmd(ymd) || ymd <= cfg.epoch) return 0;
-    var total = 0;
-    var cursor = cfg.epoch;
-    while (cursor < ymd) {
-      total += advanceForDay(cursor, olderLen, cfg);
-      cursor = addDays(cursor, 1);
-    }
+  function slotsBefore(day, config) {
+    var week = 0;
+    var i;
+    for (i = 0; i < 7; i++) week += slotsOn(ymdOfDay(i), config);
+    var total = Math.floor(day / 7) * week;
+    for (i = day - (day % 7); i < day; i++) total += slotsOn(ymdOfDay(i), config);
     return total;
   }
 
-  function planIndices(nQuotes, ymd, config) {
-    var cfg = configOf(config);
-    var slots = slotsOn(ymd, cfg);
-    var plan = [];
-    var s;
-    if (nQuotes <= 0 || slots <= 0) return plan;
-    plan.push(0);
-    if (nQuotes === 1) {
-      for (s = 1; s < slots; s++) plan.push(0);
-      return plan;
+  function shuffled(n, seed) {
+    var state = seed >>> 0;
+    var order = [];
+    var i;
+    for (i = 0; i < n; i++) order.push(i);
+    for (i = n - 1; i > 0; i--) {
+      state = (state + 0x6d2b79f5) >>> 0;
+      var t = Math.imul(state ^ (state >>> 15), state | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      var j = Math.floor((((t ^ (t >>> 14)) >>> 0) / 4294967296) * (i + 1));
+      var swap = order[i];
+      order[i] = order[j];
+      order[j] = swap;
     }
-    var olderLen = nQuotes - 1;
-    var off = continuationBefore(ymd, olderLen, cfg) % olderLen;
-    var used = { 0: 1 };
-    for (s = 1; s < slots; s++) {
-      var pick = null;
-      var t;
-      var o;
-      for (t = 0; t < olderLen; t++) {
-        o = (off + t) % olderLen;
-        var idx = 1 + o;
-        if (!used[idx]) {
-          pick = idx;
-          off = (o + 1) % olderLen;
-          break;
-        }
-      }
-      if (pick == null) pick = s % nQuotes;
-      used[pick] = 1;
-      plan.push(pick);
-    }
-    return plan;
+    return order;
   }
 
-  function sortQuotes(list) {
-    var copy = list.slice();
-    var i;
-    for (i = 0; i < copy.length; i++) copy[i]._order = i;
-    copy.sort(function (a, b) {
-      var da = a.quote_date || '';
-      var db = b.quote_date || '';
-      if (da !== db) {
-        if (!da) return 1;
-        if (!db) return -1;
-        return da < db ? 1 : -1;
-      }
-      return a._order - b._order;
-    });
-    return copy;
+  /* A block's first pick only swaps with its second, never its last, so
+     comparing against the raw previous block is exact once n > 2. */
+  function indexAt(n, slot) {
+    if (n === 1) return 0;
+    if (n === 2) return slot % 2;
+    var block = Math.floor(slot / n);
+    var order = shuffled(n, block);
+    var previous = shuffled(n, block - 1)[n - 1];
+    if (order[0] === previous) {
+      order[0] = order[1];
+      order[1] = previous;
+    }
+    return order[slot % n];
   }
 
   function normalize(data) {
@@ -244,7 +210,7 @@
         source_url: row.source_url || ''
       });
     }
-    return sortQuotes(out);
+    return out;
   }
 
   function quoteFor(date, quotes, config) {
@@ -257,30 +223,13 @@
     var minute = parts.hour * 60 + parts.minute;
     var slot = slotIndexAt(minute, win);
     if (slot < 0) return null;
-    var plan = planIndices(list.length, ymd, cfg);
-    if (slot >= plan.length) return null;
-    var index = plan[slot];
+    var index = indexAt(list.length, slotsBefore(dayNumber(ymd), cfg) + slot);
     return {
       index: index,
       slot: slot,
-      slots: plan.length,
       ymd: ymd,
       quote: list[index]
     };
-  }
-
-  function planFor(date, quotes, config) {
-    var list = quotes || [];
-    var cfg = configOf(config);
-    var parts = pacificParts(date);
-    var ymd = ymdFromParts(parts);
-    var indices = planIndices(list.length, ymd, cfg);
-    var plan = [];
-    var i;
-    for (i = 0; i < indices.length; i++) {
-      plan.push({ index: indices[i], quote: list[indices[i]] || null });
-    }
-    return plan;
   }
 
   function creditLine(quote) {
@@ -303,11 +252,9 @@
     normalize: normalize,
     slotsOn: slotsOn,
     quoteFor: quoteFor,
-    planFor: planFor,
     creditLine: creditLine,
     clockText: clockText,
     pacificParts: pacificParts,
-    addDays: addDays,
     isWeekendYmd: isWeekendYmd
   };
 });
