@@ -70,7 +70,7 @@ Leave-by already includes the drive / walk / drop-off buffer. **Do not store sch
 
 ### One shared clock (locked)
 
-Family context (for planning, not for on-screen copy): Daniel and Leah at Legacy Magnet Academy, Elena at Ladera Elementary. Two sites could imply two “must leave” times. **That does not change v1.** There is still one leave-by for the house: the time everyone needs to be out the door.
+Family context (for planning, not for on-screen copy): the kids attend two different schools. Two sites could imply two “must leave” times. **That does not change v1.** There is still one leave-by for the house: the time everyone needs to be out the door.
 
 - Data shape: one `alarm` and one `leaveBy` per weekday. No `kids[]`, no per-name times.
 - On-screen: one giant number. No kid names, no school names, no stacked clocks.
@@ -234,7 +234,7 @@ Do not add a build step, a framework, calendar OAuth, or per-kid UI.
 - Mon–Thu placeholders stay **`06:15` / `07:15`**, labeled as guesses. **Do not invent new times.**
 - Weekends are off. No Saturday sports leave-by invented.
 - On-screen copy does not use kid names or school names. Those stay in this plan and in JSON comments.
-- School start bells for Legacy Magnet Academy and Ladera Elementary were **not** looked up and are **not** stored. Leave-by is the only time that matters for v1.
+- School start bells for the kids' schools were **not** looked up and are **not** stored. Leave-by is the only time that matters for v1.
 - Stay-awake and auto-start-on-login are later setup, not v1.
 - A leftover tab is a **24/7 surface**. Idle and “end of morning” are in v1 thinking; their exact look/handoff are not locked.
 - The mock defaults to a **Friday demo** (pretend it is 6:35) so opening it at 2pm still shows a countdown. A “use the real clock” switch is there for an actual morning.
