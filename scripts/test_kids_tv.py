@@ -468,6 +468,47 @@ class RunDaysTests(unittest.TestCase):
             self.assertIsNone(bad.search(path.read_text()), path.name)
 
 
+class GraceAndStateErrorTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+
+    def test_power_on_grace_edge_is_fifteen_minutes_or_more(self):
+        for minute, second, sent in ((14, 59, True), (15, 0, False)):
+            rec, logs = Recorder(), []
+            state = self.dir / ("s%d.json" % minute)
+            kt.tick(SCHEDULE, at(THU, 6, minute, second), state, rec.actions(), logs.append)
+            self.assertEqual(bool(rec.calls), sent, (minute, second))
+            if not sent:
+                self.assertTrue(all("15 minutes or more past alarm" in m for m in logs if "skipped" in m))
+
+    def test_unwritable_state_error_is_logged_once_a_day_not_every_minute(self):
+        blocker = self.dir / "blocker"
+        blocker.write_text("a file, so a state file under it can never be written")
+        state, log, sched = blocker / "s.json", self.dir / "l.log", self.dir / "schedule.json"
+        sched.write_text(json.dumps(SCHEDULE))
+        rec = Recorder()
+
+        def run(now):
+            with mock.patch.object(kt, "make_actions", return_value=rec.actions()), \
+                    mock.patch.object(sys, "stderr", io.StringIO()) as err:
+                code = kt.main(["--schedule", str(sched), "--log", str(log), "--state", str(state),
+                                "tick", "--now", now])
+            return code, err.getvalue()
+
+        for minute in range(0, 20):
+            code, err = run("2026-10-29T06:%02d:00" % minute)
+            self.assertEqual(code, 1)
+            self.assertEqual(err.count("ERROR:"), 1 if minute == 0 else 0)
+        self.assertEqual(rec.calls, [])  # nothing was sent while the state could not be written
+        lines = log.read_text().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("cannot write state file", lines[0])
+        run("2026-10-30T06:30:00")  # a new day logs again
+        self.assertEqual(len(log.read_text().splitlines()), 2)
+
+
 class TickTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

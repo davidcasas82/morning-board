@@ -67,8 +67,8 @@ RUN_DAYS_DEFAULT = HOME / ".config" / "kids-tv" / "run-days.json"
 run_days_path_from_config: Optional[str] = None  # set from the local config by apply_local_config
 
 MAX_ATTEMPTS = 4  # per TV, per step, per day
-ON_GRACE = dt.timedelta(minutes=15)  # a power-on later than this after alarm is skipped
-OFF_GRACE = dt.timedelta(minutes=20)  # a late power-off after this is skipped
+ON_GRACE = dt.timedelta(minutes=15)  # a power-on this long or longer after alarm is skipped
+OFF_GRACE = dt.timedelta(minutes=20)  # a power-off this long or longer after on-the-road is skipped
 CAST_SETTLE_SECONDS = 4
 CAST_TRIES = 6
 CAST_RETRY_SECONDS = 3
@@ -528,9 +528,20 @@ def attempt(name: str, step: str, st: dict, now: dt.datetime, state_path, state:
 
 
 def tick(schedule: dict, now: dt.datetime, state_path, actions: Dict[str, Callable],
-         log: Callable, dry_run: bool = False) -> int:
-    """Do whatever is due. Returns the number of failed steps."""
+         log: Callable, dry_run: bool = False, error_marker=None) -> int:
+    """Do whatever is due. Returns the number of failed steps.
+
+    With error_marker (a path), the state-file errors are reported once per day
+    instead of on every minute's tick; see report_error_once.
+    """
     day = now.date()
+
+    def state_error(message: str) -> None:
+        if error_marker is None:
+            log("ERROR: " + message)
+        else:
+            report_error_once(message, day, error_marker, log)
+
     plan = plan_for(schedule, day, now)
     if plan is None:
         return 0
@@ -541,7 +552,7 @@ def tick(schedule: dict, now: dt.datetime, state_path, actions: Dict[str, Callab
     try:
         if corrupt and not dry_run:
             save_state(state_path, state)  # so today is marked acted, and tomorrow recovers
-            log("ERROR: state file is unreadable, so nothing is sent today")
+            state_error("state file is unreadable, so nothing is sent today")
         for name in TVS:
             st = state["tvs"].setdefault(name, {})
             step = decide(on_at, off_at, now, st)
@@ -549,11 +560,11 @@ def tick(schedule: dict, now: dt.datetime, state_path, actions: Dict[str, Callab
                 continue
             if step == "skip_on":
                 if dry_run:
-                    print("%s: would skip power-on, more than %d minutes past alarm" % (name, ON_GRACE.seconds // 60))
+                    print("%s: would skip power-on, %d minutes or more past alarm" % (name, ON_GRACE.seconds // 60))
                     continue
                 st["on_skipped"] = now.isoformat()
                 save_state(state_path, state)
-                log("%s: power-on skipped, more than %d minutes past alarm" % (name, ON_GRACE.seconds // 60))
+                log("%s: power-on skipped, %d minutes or more past alarm" % (name, ON_GRACE.seconds // 60))
                 continue
             if dry_run:
                 print("%s: would %s" % (name, step))
@@ -565,9 +576,14 @@ def tick(schedule: dict, now: dt.datetime, state_path, actions: Dict[str, Callab
                 if not attempt(name, "cast", st, now, state_path, state, actions, log):
                     failures += 1
     except StateError as exc:
-        log("ERROR: %s, so nothing more is sent today" % exc)
+        state_error("%s, so nothing more is sent today" % exc)
         return failures + 1
     return failures
+
+
+def error_marker_path(args) -> Path:
+    """Beside the log, not the state file: it must work when the state directory is the problem."""
+    return Path(args.log).with_name("kids-tv-error-day.json")
 
 
 def report_error_once(message: str, day: dt.date, marker_path, log: Callable) -> None:
@@ -667,7 +683,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             zone = schedule_zone(schedule)
             now = dt.datetime.fromisoformat(args.now).replace(tzinfo=zone) if args.now else dt.datetime.now(zone)
             error_day = now.date()
-            failed = tick(schedule, now, args.state, make_actions(args), log, dry_run=args.dry_run)
+            failed = tick(schedule, now, args.state, make_actions(args), log, dry_run=args.dry_run,
+                          error_marker=error_marker_path(args))
             return 1 if failed else 0
         actions = make_actions(args)
         names = list(TVS) if args.tv == "all" else [args.tv]
@@ -684,8 +701,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
     except (ScheduleError, TvError, ValueError) as exc:
         if args.cmd == "tick":
-            marker = Path(args.state).with_name("kids-tv-error-day.json")
-            report_error_once(str(exc), error_day, marker, log)
+            report_error_once(str(exc), error_day, error_marker_path(args), log)
         else:
             log("ERROR: %s" % exc)
             sys.stderr.write("ERROR: %s\n" % exc)
