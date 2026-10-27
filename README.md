@@ -30,3 +30,28 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davidcasas.morningbo
 ```
 
 From another machine on the LAN, open `http://<mini>:8780/`. The CSV sync LaunchAgent is unchanged.
+
+## Kids' bedroom TVs
+
+`scripts/kids-tv.py` turns on the two bedroom Vizio TVs at the board's alarm time, casts the board to them, and powers each off once at on-the-road time (not downstairs time). It reads `schedule.json` fresh on every run, so a schedule change carries over. A day whose `enabled` is not a real `true`, or that has no alarm or leaveBy, runs nothing. A date listed in `kids-tv-skip.json` (`{"skipDates": ["2026-10-30"]}`, read fresh each run) also runs nothing; a missing file means no skips, and a malformed one logs an error and runs nothing that day. It does not touch the board, the frame or the TCL TV.
+
+```
+python3 scripts/kids-tv.py plan --date 2026-10-29   # print the times, touch no TV
+python3 scripts/kids-tv.py tick --dry-run            # print what is due now, send nothing
+python3 scripts/kids-tv.py on --tv girls-room             # manual: power on, then cast
+python3 scripts/kids-tv.py cast --tv girls-room           # manual: cast only
+python3 scripts/kids-tv.py off --tv girls-room            # manual: power off
+python3 scripts/kids-tv.py status                    # read each TV's power state
+```
+
+LaunchAgent `launchd/com.davidcasas.morningboard.kids-tv.plist` runs `tick` once a minute and at login. `tick` only reads the schedule and a small state file; it sends to a TV only when a step is due: one power-on and cast per TV after alarm, one power-off per TV after on-the-road. The state file (`~/Library/Application Support/morning-board/kids-tv-state.json`) keeps a reboot or a second tick from repeating a step. Nothing polls a TV, and a kid who switches away is left alone. A power-on more than 15 minutes after alarm is skipped for the day and logged, and after 20 minutes past on-the-road a missed power-off is skipped. Each step is written to the state file before it is sent; if the state file cannot be written, or is damaged, nothing is sent that day and an error is logged. A failed step is retried on later ticks, up to four times, then logged and dropped for the day.
+
+Each TV's address and token live in an env file in `~/.config/vizio/` (`<PREFIX>IP` and `<PREFIX>TOKEN`). The repo only knows the neutral keys `boys-room` and `girls-room`, whose defaults are `boys-room.env` with prefix `VIZIO_BOYS_ROOM_` and `girls-room.env` with prefix `VIZIO_GIRLS_ROOM_`. To map a key to a different file, put `{"tvs": {"boys-room": {"env_file": "x.env", "prefix": "VIZIO_X_"}}}` in the mini-local `~/.config/kids-tv/config.json`, which is not in git and holds no tokens. They are read inside the script and never logged. Casting uses the `catt` binary at `~/Tools/catt-venv/bin/catt` (override with `KIDS_TV_CATT`). The log is `~/Library/Logs/kids-tv-morning-board.log`.
+
+Install as the mini account. This is the step that makes it live:
+
+```
+sed -e "s|__REPO__|$HOME/code/morning-board|g" -e "s|__HOME__|$HOME|g" \
+  launchd/com.davidcasas.morningboard.kids-tv.plist > ~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv.plist
+```

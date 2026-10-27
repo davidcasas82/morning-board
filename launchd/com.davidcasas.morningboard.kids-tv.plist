@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Kids' bedroom TVs show the morning board. User LaunchAgent for
+  ~/Library/LaunchAgents/. Replace __REPO__ and __HOME__. No sudo.
+  Once a minute it runs `kids-tv.py tick`, which reads schedule.json and sends
+  nothing to a TV unless a step is due. See README, "Kids' bedroom TVs".
+  A user agent starts after login, not at the boot chime. Auto-login for
+  casasmacmini-server is a dependency. After a reboot RunAtLoad ticks at once,
+  and the state file keeps a step from repeating.
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv.plist
+  Stop it with:
+    launchctl bootout gui/$(id -u)/com.davidcasas.morningboard.kids-tv
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.davidcasas.morningboard.kids-tv</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__REPO__/scripts/kids-tv.py</string>
+    <string>tick</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/kids-tv-morning-board.out</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/kids-tv-morning-board.err</string>
+</dict>
+</plist>
