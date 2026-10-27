@@ -5,8 +5,11 @@ On a board day, at the board's alarm time, turn on the two bedroom Vizio TVs
 and cast the morning board. At on-the-road time, power each one off once.
 
 Times come from schedule.json, read fresh on every run. Nothing is hard-coded.
-is_run_day() decides whether today is a run day: schedule.json, minus any date
-in kids-tv-skip.json. No run day means nothing runs.
+is_run_day() decides whether today is a run day: schedule.json has the weekday
+on, the calendar run-days file says run for that date, and the date is not in
+kids-tv-skip.json. No run day means nothing runs. If the run-days file is
+missing, unreadable, stale or lacks the date, nothing runs and one ERROR is
+logged for the day. See README, "Calendar run days".
 
     kids-tv.py plan [--date YYYY-MM-DD] [--json]   print the times, touch no TV
     kids-tv.py tick                                what launchd runs every minute
@@ -18,7 +21,7 @@ state file, so a reboot or a second tick never repeats it. It never checks
 what the TV is doing, so a kid who switches away is left alone.
 
 Which env file belongs to which TV is local to the mini, in
-~/.config/kids-tv/config.json ("tvs"); the repo only knows the neutral keys
+~/.config/kids-tv/config.json ("tvs", and optionally "run_days_path"); the repo only knows the neutral keys
 boys-room and girls-room. Tokens come from ~/.config/vizio/<env file> and are used only inside this
 script. They are never printed, logged, or put on a command line.
 Python 3.9 standard library only. Casting uses the catt binary.
@@ -58,6 +61,11 @@ VIZIO_PORT = 7345
 # SmartCast power keys: codeset 11, code 1 = power on, code 0 = power off.
 POWER_CODES = {"on": 1, "off": 0}
 
+RUN_DAYS_MAX_AGE = dt.timedelta(days=5)  # an older run-days file is stale: nothing runs
+RUN_DAYS_MAX_FUTURE = dt.timedelta(days=1)  # a generated_at further ahead than this is not believed
+RUN_DAYS_DEFAULT = HOME / ".config" / "kids-tv" / "run-days.json"
+run_days_path_from_config: Optional[str] = None  # set from the local config by apply_local_config
+
 MAX_ATTEMPTS = 4  # per TV, per step, per day
 ON_GRACE = dt.timedelta(minutes=15)  # a power-on later than this after alarm is skipped
 OFF_GRACE = dt.timedelta(minutes=20)  # a late power-off after this is skipped
@@ -76,6 +84,10 @@ class TvError(Exception):
 
 class StateError(Exception):
     pass
+
+
+class RunDaysError(ScheduleError):
+    """The calendar run-days file cannot be trusted. Nothing runs that day."""
 
 
 # ---------------------------------------------------------------- schedule
@@ -127,6 +139,11 @@ def load_local_config(path) -> dict:
 
 
 def apply_local_config(config: dict) -> None:
+    global run_days_path_from_config
+    path = config.get("run_days_path")
+    if path is not None and (not isinstance(path, str) or not path.strip()):
+        raise ScheduleError("local config run_days_path is not a path")
+    run_days_path_from_config = path
     tvs = config.get("tvs", {})
     if not isinstance(tvs, dict):
         raise ScheduleError("local config tvs is not an object")
@@ -177,6 +194,69 @@ def load_skip_dates(path) -> set:
     return out
 
 
+def default_run_days_path() -> Path:
+    """KIDS_TV_RUN_DAYS, else run_days_path in the local config, else the default."""
+    chosen = os.environ.get("KIDS_TV_RUN_DAYS") or run_days_path_from_config or RUN_DAYS_DEFAULT
+    return Path(chosen).expanduser()
+
+
+def clock() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def parse_generated_at(value, now: dt.datetime) -> dt.datetime:
+    if not isinstance(value, str):
+        raise RunDaysError("run-days file has no generated_at timestamp, so nothing runs")
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    # Python 3.9's fromisoformat only takes 3 or 6 fractional digits.
+    text = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], text, count=1)
+    try:
+        stamp = dt.datetime.fromisoformat(text)
+    except ValueError:
+        raise RunDaysError("run-days generated_at is not an ISO 8601 time, so nothing runs")
+    if stamp.tzinfo is None:  # no zone given: read it in the schedule's zone
+        stamp = stamp.replace(tzinfo=now.tzinfo or dt.timezone.utc)
+    return stamp
+
+
+def run_day_says_run(path, day: dt.date, now: dt.datetime) -> bool:
+    """What the calendar run-days file says about one date.
+
+    Returns True only for a literal true. A literal false is a normal "no" and
+    is not an error. Anything that cannot be trusted raises RunDaysError, so
+    the caller does nothing that day and logs one error: the file is missing or
+    unreadable, is not the expected JSON, has no entry for the date, has a
+    non-boolean run, or was generated more than 5 days ago (or more than a day
+    in the future, or at an unreadable time). The free-text "why" is never read.
+    """
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise RunDaysError("run-days file is missing, so nothing runs")
+    except OSError:
+        raise RunDaysError("run-days file is unreadable, so nothing runs")
+    try:
+        data = json.loads(text)
+    except ValueError:
+        raise RunDaysError("run-days file is not valid JSON, so nothing runs")
+    if not isinstance(data, dict) or not isinstance(data.get("days"), dict):
+        raise RunDaysError("run-days file has no days object, so nothing runs")
+    age = now - parse_generated_at(data.get("generated_at"), now)
+    if age > RUN_DAYS_MAX_AGE:
+        raise RunDaysError("run-days file is stale (generated %d days ago), so nothing runs" % age.days)
+    if age < -RUN_DAYS_MAX_FUTURE:
+        raise RunDaysError("run-days generated_at is in the future, so nothing runs")
+    entry = data["days"].get(day.isoformat())
+    if entry is None:
+        raise RunDaysError("run-days file has no entry for %s, so nothing runs" % day.isoformat())
+    if not isinstance(entry, dict) or not isinstance(entry.get("run"), bool):
+        raise RunDaysError("run-days entry for %s has no true/false run, so nothing runs" % day.isoformat())
+    return entry["run"]
+
+
 def schedule_zone(schedule: dict) -> ZoneInfo:
     name = schedule.get("timezone") or DEFAULT_TZ
     try:
@@ -185,33 +265,39 @@ def schedule_zone(schedule: dict) -> ZoneInfo:
         raise ScheduleError("schedule timezone is not a known zone")
 
 
-def is_run_day(schedule: dict, day: dt.date, skip_path=None) -> bool:
+def is_run_day(schedule: dict, day: dt.date, skip_path=None, run_days_path=None,
+               now: Optional[dt.datetime] = None) -> bool:
     """Is this a day the TVs should run? The only place that decides.
 
-    Today: schedule.json says so, meaning the weekday is enabled and has both
-    alarm and leaveBy, with enabled a real true (that is how the board decides too), and the date is not
-    listed in the skip file (kids-tv-skip.json, read fresh each call; see
-    load_skip_dates for the missing and malformed cases).
-
-    To swap in another rule (for example the Kid Rotation calendar's Dad's
-    House morning minus no-school days), replace this body, or have it call a
-    new function. Keep the signature. plan_for calls it and nothing else
-    decides a run day. On and off times still come from schedule.json, so a
-    run day with no alarm and leaveBy in the schedule raises ScheduleError.
+    All three must hold:
+      1. schedule.json has the weekday enabled (a real true, as the board
+         decides) with both alarm and leaveBy.
+      2. The date is not in the skip file (kids-tv-skip.json, read fresh each
+         call). A missing file means no skips; a malformed one raises
+         ScheduleError, so nothing runs that day.
+      3. The calendar run-days file (see run_day_says_run) says run is true for
+         the date. Its errors raise RunDaysError: nothing runs, one error is logged.
+    The skip list wins over a run of true. The run-days file is only read for a
+    weekday the schedule has on, so a Tuesday with no board raises nothing.
+    On and off times still come from schedule.json, so plan_for calls this and
+    nothing else decides a run day.
     """
-    if day in load_skip_dates(skip_path or default_skip_path()):
-        return False
+    skipped = day in load_skip_dates(skip_path or default_skip_path())
     entry = schedule["days"].get(DAY_KEYS[day.weekday()])
-    return bool(isinstance(entry, dict) and entry.get("enabled") is True
-                and entry.get("alarm") and entry.get("leaveBy"))
+    if not (isinstance(entry, dict) and entry.get("enabled") is True
+            and entry.get("alarm") and entry.get("leaveBy")):
+        return False
+    if skipped:
+        return False
+    return run_day_says_run(run_days_path or default_run_days_path(), day, now or clock())
 
 
-def plan_for(schedule: dict, day: dt.date) -> Optional[dict]:
+def plan_for(schedule: dict, day: dt.date, now: Optional[dt.datetime] = None) -> Optional[dict]:
     """Return {"label", "on", "off"} for a run day, None when nothing runs.
 
     The times are alarm and leaveBy: on-the-road time, not downstairs time.
     """
-    if not is_run_day(schedule, day):
+    if not is_run_day(schedule, day, now=now):
         return None
     key = DAY_KEYS[day.weekday()]
     entry = schedule["days"].get(key)
@@ -445,7 +531,7 @@ def tick(schedule: dict, now: dt.datetime, state_path, actions: Dict[str, Callab
          log: Callable, dry_run: bool = False) -> int:
     """Do whatever is due. Returns the number of failed steps."""
     day = now.date()
-    plan = plan_for(schedule, day)
+    plan = plan_for(schedule, day, now)
     if plan is None:
         return 0
     on_at = dt.datetime.combine(day, plan["on"], tzinfo=now.tzinfo)
@@ -455,7 +541,7 @@ def tick(schedule: dict, now: dt.datetime, state_path, actions: Dict[str, Callab
     try:
         if corrupt and not dry_run:
             save_state(state_path, state)  # so today is marked acted, and tomorrow recovers
-            log("error: state file is unreadable, so nothing is sent today")
+            log("ERROR: state file is unreadable, so nothing is sent today")
         for name in TVS:
             st = state["tvs"].setdefault(name, {})
             step = decide(on_at, off_at, now, st)
@@ -479,9 +565,38 @@ def tick(schedule: dict, now: dt.datetime, state_path, actions: Dict[str, Callab
                 if not attempt(name, "cast", st, now, state_path, state, actions, log):
                     failures += 1
     except StateError as exc:
-        log("error: %s, so nothing more is sent today" % exc)
+        log("ERROR: %s, so nothing more is sent today" % exc)
         return failures + 1
     return failures
+
+
+def report_error_once(message: str, day: dt.date, marker_path, log: Callable) -> None:
+    """Log an error and write it to stderr (launchd's .err file), once per day.
+
+    tick runs every minute, so the same problem is reported only on the first
+    run of the day. The marker is a small file beside the state file. If it
+    cannot be read or written, the error is reported anyway: a noisy error is
+    better than a silent one.
+    """
+    marker = Path(marker_path)
+    seen: List[str] = []
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and data.get("date") == day.isoformat() and isinstance(data.get("seen"), list):
+            seen = [m for m in data["seen"] if isinstance(m, str)]
+    except (OSError, ValueError):
+        pass
+    if message in seen:
+        return
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        tmp = marker.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"date": day.isoformat(), "seen": seen + [message]}), encoding="utf-8")
+        os.replace(tmp, marker)
+    except OSError:
+        pass
+    log("ERROR: %s" % message)
+    sys.stderr.write("ERROR: %s\n" % message)
 
 
 # ----------------------------------------------------------------------- cli
@@ -490,6 +605,7 @@ def tick(schedule: dict, now: dt.datetime, state_path, actions: Dict[str, Callab
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Kids' bedroom TVs show the morning board.")
     p.add_argument("--schedule", default=None, help="schedule.json (default: this repo's)")
+    p.add_argument("--run-days", default=None, help="calendar run-days file (default: KIDS_TV_RUN_DAYS, the local config's run_days_path, or ~/.config/kids-tv/run-days.json)")
     p.add_argument("--config", default=None, help="local config (default: ~/.config/kids-tv/config.json)")
     p.add_argument("--config-dir", default=str(HOME / ".config" / "vizio"))
     p.add_argument("--state", default=str(HOME / "Library" / "Application Support" / "morning-board" / "kids-tv-state.json"))
@@ -529,7 +645,10 @@ def make_actions(args) -> Dict[str, Callable]:
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     log = Log(args.log)
+    if args.run_days:
+        os.environ["KIDS_TV_RUN_DAYS"] = args.run_days
     schedule_path = args.schedule or default_schedule_path()
+    error_day = dt.date.today()
     try:
         apply_local_config(load_local_config(args.config or default_config_path()))
         if args.cmd == "plan":
@@ -547,6 +666,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             schedule = load_schedule(schedule_path)
             zone = schedule_zone(schedule)
             now = dt.datetime.fromisoformat(args.now).replace(tzinfo=zone) if args.now else dt.datetime.now(zone)
+            error_day = now.date()
             failed = tick(schedule, now, args.state, make_actions(args), log, dry_run=args.dry_run)
             return 1 if failed else 0
         actions = make_actions(args)
@@ -563,8 +683,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print("%s: %s sent" % (name, step))
         return 0
     except (ScheduleError, TvError, ValueError) as exc:
-        log("error: %s" % exc)
-        sys.stderr.write("error: %s\n" % exc)
+        if args.cmd == "tick":
+            marker = Path(args.state).with_name("kids-tv-error-day.json")
+            report_error_once(str(exc), error_day, marker, log)
+        else:
+            log("ERROR: %s" % exc)
+            sys.stderr.write("ERROR: %s\n" % exc)
         return 1
 
 

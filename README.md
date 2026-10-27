@@ -48,6 +48,23 @@ LaunchAgent `launchd/com.davidcasas.morningboard.kids-tv.plist` runs `tick` once
 
 Each TV's address and token live in an env file in `~/.config/vizio/` (`<PREFIX>IP` and `<PREFIX>TOKEN`). The repo only knows the neutral keys `boys-room` and `girls-room`, whose defaults are `boys-room.env` with prefix `VIZIO_BOYS_ROOM_` and `girls-room.env` with prefix `VIZIO_GIRLS_ROOM_`. To map a key to a different file, put `{"tvs": {"boys-room": {"env_file": "x.env", "prefix": "VIZIO_X_"}}}` in the mini-local `~/.config/kids-tv/config.json`, which is not in git and holds no tokens. They are read inside the script and never logged. Casting uses the `catt` binary at `~/Tools/catt-venv/bin/catt` (override with `KIDS_TV_CATT`). The log is `~/Library/Logs/kids-tv-morning-board.log`.
 
+### Calendar run days
+
+Which days the TVs come on is decided by three things together: `schedule.json` has the weekday on with an alarm and leaveBy, the run-days file says `run` is `true` for that date, and the date is not in `kids-tv-skip.json` (the skip list wins). The repo holds no calendar names or ids.
+
+The run-days file, `~/.config/kids-tv/run-days.json`, is written by a scheduled Grok job (owned by the CTO agent) on the mini, atomically, a few evenings a week, looking 14 days ahead. This script only reads it, fresh on every run. Set another path with `"run_days_path"` in `~/.config/kids-tv/config.json`, `KIDS_TV_RUN_DAYS`, or `--run-days`.
+
+```
+{"generated_at": "2026-10-28T20:15:00-07:00", "horizon_end": "2026-11-11",
+ "days": {"2026-10-29": {"kids_home": true, "no_school": false, "run": true, "why": "free text"}}}
+```
+
+Only `run` decides, and only a real `true` runs the TVs. `why` is never read or logged.
+
+Fail-safe: the TVs never come on by default. On a day the schedule has on, if the file is missing, unreadable or not valid JSON, has no entry for the date, has a `run` that is not true or false, or has a `generated_at` that is more than 5 days old (or unreadable, or more than a day in the future), nothing runs that day. One `ERROR:` line is written to the log and to the `.err` file for that day, not one per minute. A `run` of `false` is a normal "no" and is not an error. A weekday the schedule has off never reads the file.
+
+`plan --date YYYY-MM-DD --run-days /tmp/fixture.json` shows what a file would do without touching a TV.
+
 Install as the mini account. This is the step that makes it live:
 
 ```
