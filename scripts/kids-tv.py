@@ -64,6 +64,10 @@ OFF_GRACE = dt.timedelta(minutes=20)  # a late power-off after this is skipped
 CAST_SETTLE_SECONDS = 4
 CAST_TRIES = 6
 CAST_RETRY_SECONDS = 3
+STOP_WAIT_SECONDS = 15  # after quitting the cast app, wait this long at most for the receiver to go idle
+OFF_CHECKS = (5, 30, 60, 90)  # seconds after a power-off at which the power state is read
+OFF_SENDS = 3  # power-offs per off step, at most
+BACKDROP_APP_ID = "E8C28D3C"  # the Chromecast's idle (ambient) screen
 
 
 class ScheduleError(Exception):
@@ -276,6 +280,10 @@ def parse_env(path) -> Dict[str, str]:
     return values
 
 
+class OffDidNotStick(TvError):
+    """Every power-off went out, but the TV was still on afterwards. Never retried on a later tick."""
+
+
 class Tv:
     def __init__(self, name: str, config_dir):
         self.name = name
@@ -323,6 +331,87 @@ class Tv:
         payload = self._request("GET", "/state/device/power_mode")
         items = payload.get("ITEMS") or [{}]
         return {1: "on", 0: "off"}.get(items[0].get("VALUE"), "unknown")
+
+    def _catt(self, catt: str, *args: str):
+        return subprocess.run([catt, "-d", self._ip] + list(args), stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=30)
+
+    def cast_app(self, catt: str) -> Optional[str]:
+        """The receiver app running on the TV's Chromecast, or None when it is idle."""
+        try:
+            done = self._catt(catt, "info", "-j")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise TvError("%s: cast status failed (%s)" % (self.name, exc.__class__.__name__))
+        try:
+            info = json.loads(done.stdout) if done.returncode == 0 else None
+        except ValueError:
+            info = None
+        if not isinstance(info, dict):
+            raise TvError("%s: cast status failed (exit %d)" % (self.name, done.returncode))
+        app = info.get("app_id")
+        return None if not app or app == BACKDROP_APP_ID else str(app)
+
+    def stop_cast(self, catt: str, log: Callable) -> bool:
+        """Quit whatever is casting and wait until the receiver is idle, STOP_WAIT_SECONDS at most.
+
+        A TV powered off while the board is still casting can wake itself back up,
+        so the off step stops the cast first. Returns True when the receiver reads idle.
+        """
+        try:
+            if self.cast_app(catt) is None:
+                return True
+        except TvError:
+            pass  # unknown: stop anyway
+        try:
+            done = self._catt(catt, "stop")
+            if done.returncode != 0:
+                log("%s: cast stop exited %d" % (self.name, done.returncode))
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log("%s: cast stop failed (%s)" % (self.name, exc.__class__.__name__))
+        deadline = time.monotonic() + STOP_WAIT_SECONDS
+        while True:
+            try:
+                if self.cast_app(catt) is None:
+                    log("%s: cast stopped, receiver idle" % self.name)
+                    return True
+            except TvError:
+                pass
+            if time.monotonic() >= deadline:
+                log("%s: receiver still not idle after %d s, powering off anyway" % (self.name, STOP_WAIT_SECONDS))
+                return False
+            time.sleep(1)
+
+    def power_off_verified(self, catt: str, log: Callable) -> None:
+        """Stop the cast, power off, and make sure it stays off.
+
+        After each power-off the power state is read at OFF_CHECKS seconds. If it
+        reads on, the cast is stopped again and another power-off is sent, up to
+        OFF_SENDS in all. Still on after that: an ERROR is logged and
+        OffDidNotStick is raised, which the caller never retries. This is the only
+        time the job reads a TV's state after it turned it on.
+        """
+        for send in range(1, OFF_SENDS + 1):
+            self.stop_cast(catt, log)
+            self.power_key("off")
+            sent = time.monotonic()
+            readings = []
+            bounced = False
+            for after in OFF_CHECKS:
+                time.sleep(max(0.0, sent + after - time.monotonic()))
+                try:
+                    mode = self.power_mode()
+                except TvError:
+                    mode = "unreadable"
+                readings.append("%ds %s" % (after, mode))
+                if mode == "on":
+                    bounced = True
+                    break
+            log("%s: power off %d of %d, then %s" % (self.name, send, OFF_SENDS, ", ".join(readings)))
+            if not bounced:
+                return
+        message = "%s: still on after %d power-offs" % (self.name, OFF_SENDS)
+        log("ERROR: " + message)
+        raise OffDidNotStick(message)
 
     def cast(self, catt: str) -> None:
         cmd = [catt, "-d", self._ip, "cast_site", BOARD_URL]
@@ -429,6 +518,8 @@ def attempt(name: str, step: str, st: dict, now: dt.datetime, state_path, state:
     try:
         actions[step](name)
     except TvError as exc:
+        if isinstance(exc, OffDidNotStick):
+            return False  # the power-offs went out and the ERROR is logged; a later tick must not repeat them
         st.pop(DONE_KEY[step], None)
         log("%s: %s failed, try %d of %d: %s" % (name, step, st[step + "_tries"], MAX_ATTEMPTS, exc))
         try:
@@ -512,6 +603,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def make_actions(args) -> Dict[str, Callable]:
     cache: Dict[str, Tv] = {}
+    log = Log(args.log)
 
     def tv(name: str) -> Tv:
         if name not in cache:
@@ -520,7 +612,7 @@ def make_actions(args) -> Dict[str, Callable]:
 
     return {
         "on": lambda n: tv(n).power_key("on"),
-        "off": lambda n: tv(n).power_key("off"),
+        "off": lambda n: tv(n).power_off_verified(args.catt, log),
         "cast": lambda n: tv(n).cast(args.catt),
         "status": lambda n: print("%s: %s" % (n, tv(n).power_mode())),
     }

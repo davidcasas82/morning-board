@@ -498,6 +498,146 @@ class SecretTests(unittest.TestCase):
             self.assertNotIn(self.IP, str(ctx.exception))
 
 
+class OffSticksTests(unittest.TestCase):
+    """The off step stops the cast, powers off, and checks it stayed off. No TV, no network."""
+
+    DASHCAST = "84912283"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        Path(self.tmp.name, "boys-room.env").write_text("VIZIO_BOYS_ROOM_IP=10.9.8.7\nVIZIO_BOYS_ROOM_TOKEN=t\n")
+        self.tv = kt.Tv("boys-room", self.tmp.name)
+        self.now = 0.0
+        self.events = []  # (seconds, what)
+        self.logs = []
+        self.app = None  # what the receiver reports: None is idle
+        self.power = lambda t: "off"  # power state at fake time t
+        patches = [
+            mock.patch.object(kt.time, "sleep", self.sleep),
+            mock.patch.object(kt.time, "monotonic", lambda: self.now),
+            mock.patch.object(self.tv, "_catt", self.catt),
+            mock.patch.object(self.tv, "power_key", lambda state: self.events.append((self.now, "key " + state))),
+            mock.patch.object(self.tv, "power_mode", self.read_power),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def sleep(self, seconds):
+        self.now += max(0.0, seconds)
+
+    def read_power(self):
+        mode = self.power(self.now)
+        self.events.append((self.now, "read " + mode))
+        return mode
+
+    def catt(self, catt, *args):
+        self.events.append((self.now, "catt " + " ".join(args)))
+        self.now += 1.0  # a catt call takes a moment
+        if args[0] == "stop":
+            self.app = None
+        if args[0] == "info":
+            return mock.Mock(returncode=0, stdout=json.dumps({"app_id": self.app}), stderr="")
+        return mock.Mock(returncode=0, stdout="", stderr="")
+
+    def off(self):
+        self.tv.power_off_verified("/fake/catt", self.logs.append)
+
+    def names(self):
+        return [what for _, what in self.events]
+
+    def test_cast_is_stopped_before_power_off(self):
+        self.app = self.DASHCAST
+        self.off()
+        names = self.names()
+        self.assertLess(names.index("catt stop"), names.index("key off"))
+        # the receiver was read idle after the stop and before the power-off
+        self.assertIn("catt info -j", names[names.index("catt stop"):names.index("key off")])
+        self.assertTrue(any("receiver idle" in m for m in self.logs))
+
+    def test_idle_receiver_is_not_stopped(self):
+        self.off()
+        self.assertNotIn("catt stop", self.names())
+
+    def test_success_first_try_reads_at_5_30_60_90(self):
+        self.off()
+        sent = [t for t, what in self.events if what == "key off"]
+        self.assertEqual(len(sent), 1)
+        reads = [t - sent[0] for t, what in self.events if what.startswith("read")]
+        self.assertEqual(reads, [5, 30, 60, 90])
+        self.assertEqual(self.logs[-1], "boys-room: power off 1 of 3, then 5s off, 30s off, 60s off, 90s off")
+
+    def test_bounce_back_stops_the_cast_again_and_retries(self):
+        self.app = self.DASHCAST
+
+        def power(t):
+            sent = [x for x, what in self.events if what == "key off"]
+            if len(sent) == 1 and t - sent[0] >= 30:
+                self.app = self.DASHCAST  # the receiver woke the TV back up
+                return "on"
+            return "off"
+
+        self.power = power
+        self.off()
+        names = self.names()
+        self.assertEqual(names.count("key off"), 2)
+        self.assertEqual(names.count("catt stop"), 2)
+        second_off = len(names) - 1 - names[::-1].index("key off")
+        self.assertLess(len(names) - 1 - names[::-1].index("catt stop"), second_off)
+        self.assertIn("boys-room: power off 1 of 3, then 5s off, 30s on", self.logs)
+        self.assertTrue(self.logs[-1].startswith("boys-room: power off 2 of 3"))
+        self.assertFalse(any(m.startswith("ERROR") for m in self.logs))
+
+    def test_three_bounces_log_error_and_raise(self):
+        self.power = lambda t: "on"
+        with self.assertRaises(kt.OffDidNotStick):
+            self.off()
+        self.assertEqual(self.names().count("key off"), kt.OFF_SENDS)
+        self.assertEqual(kt.OFF_SENDS, 3)
+        self.assertEqual(self.logs[-1], "ERROR: boys-room: still on after 3 power-offs")
+
+    def test_stop_wait_is_bounded(self):
+        self.app = self.DASHCAST
+
+        def stubborn(catt, *args):
+            self.events.append((self.now, "catt " + " ".join(args)))
+            self.now += 1.0
+            return mock.Mock(returncode=0, stdout=json.dumps({"app_id": self.DASHCAST}), stderr="")
+
+        with mock.patch.object(self.tv, "_catt", stubborn):
+            self.off()
+        first_off = [t for t, what in self.events if what == "key off"][0]
+        self.assertLessEqual(first_off, kt.STOP_WAIT_SECONDS + 3)
+        self.assertTrue(any("not idle" in m for m in self.logs))
+
+    def test_manual_off_that_does_not_stick_exits_nonzero(self):
+        log = Path(self.tmp.name, "kids-tv.log")
+        with mock.patch.object(kt.Tv, "power_off_verified", side_effect=kt.OffDidNotStick("boys-room: still on")), \
+                mock.patch("sys.stderr"):
+            rc = kt.main(["--config-dir", self.tmp.name, "--log", str(log), "off", "--tv", "boys-room"])
+        self.assertEqual(rc, 1)
+
+    def test_tick_never_repeats_an_off_that_did_not_stick(self):
+        state = Path(self.tmp.name, "state.json")
+        logs = []
+        offs = []
+
+        def off(name):
+            offs.append(name)
+            raise kt.OffDidNotStick(name + ": still on after 3 power-offs")
+
+        actions = {"on": lambda n: None, "cast": lambda n: None, "off": off}
+        kt.tick(SCHEDULE, at(THU, 6, 0), state, actions, logs.append)
+        failures = [kt.tick(SCHEDULE, at(THU, 7, 10) + dt.timedelta(minutes=m), state, actions, logs.append)
+                    for m in range(0, 25)]
+        self.assertEqual(offs, ["boys-room", "girls-room"])
+        self.assertEqual(failures[0], 2)
+        self.assertEqual(sum(failures[1:]), 0)
+        saved = json.loads(state.read_text())["tvs"]
+        self.assertTrue(saved["boys-room"]["off_done"])
+
+
 class PlistTests(unittest.TestCase):
     def test_plist_runs_tick_each_minute_and_is_parseable(self):
         path = ROOT / "launchd" / "com.davidcasas.morningboard.kids-tv.plist"
