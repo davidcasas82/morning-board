@@ -69,6 +69,16 @@ class PlanTests(unittest.TestCase):
         for day in (TUE, dt.date(2026, 10, 28), dt.date(2026, 10, 31), dt.date(2026, 11, 1)):
             self.assertIsNone(kt.plan_for(SCHEDULE, day), day)
 
+    def test_is_run_day_is_the_only_gate(self):
+        self.assertTrue(kt.is_run_day(SCHEDULE, THU))
+        self.assertFalse(kt.is_run_day(SCHEDULE, TUE))
+        with mock.patch.object(kt, "is_run_day", return_value=False):
+            self.assertIsNone(kt.plan_for(SCHEDULE, THU))
+        with mock.patch.object(kt, "is_run_day", return_value=True):
+            self.assertEqual(kt.hm(kt.plan_for(SCHEDULE, THU)["on"]), "06:00")
+            with self.assertRaises(kt.ScheduleError):
+                kt.plan_for(SCHEDULE, TUE)
+
     def test_enabled_without_times_is_no_board_day(self):
         sched = json.loads(json.dumps(SCHEDULE))
         sched["days"]["thursday"]["leaveBy"] = None

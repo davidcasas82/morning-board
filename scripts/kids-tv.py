@@ -5,7 +5,8 @@ On a board day, at the board's alarm time, turn on Dan's Vizio and the girls'
 Vizio and cast the morning board. At on-the-road time, power each one off once.
 
 Times come from schedule.json, read fresh on every run. Nothing is hard-coded.
-A day with no enabled alarm and leaveBy means nothing runs.
+is_run_day() decides whether today is a run day; today that is schedule.json
+only. No run day means nothing runs.
 
     kids-tv.py plan [--date YYYY-MM-DD] [--json]   print the times, touch no TV
     kids-tv.py tick                                what launchd runs every minute
@@ -100,18 +101,34 @@ def schedule_zone(schedule: dict) -> ZoneInfo:
     return ZoneInfo(schedule.get("timezone") or DEFAULT_TZ)
 
 
-def plan_for(schedule: dict, day: dt.date) -> Optional[dict]:
-    """Return {"label", "on", "off"} for a board day, None when nothing runs.
+def is_run_day(schedule: dict, day: dt.date) -> bool:
+    """Is this a day the TVs should run? The only place that decides.
 
-    A board day is enabled with both alarm and leaveBy set, which is how the
-    board decides too. Leave-by is on-the-road time, not downstairs time.
+    Today: schedule.json says so, meaning the weekday is enabled and has both
+    alarm and leaveBy. That is how the board decides too.
+
+    To swap in another rule (for example the Kid Rotation calendar's Dad's
+    House morning minus no-school days), replace this body, or have it call a
+    new function. Keep the signature. plan_for calls it and nothing else
+    decides a run day. On and off times still come from schedule.json, so a
+    run day with no alarm and leaveBy in the schedule raises ScheduleError.
     """
+    entry = schedule["days"].get(DAY_KEYS[day.weekday()])
+    return bool(isinstance(entry, dict) and entry.get("enabled")
+                and entry.get("alarm") and entry.get("leaveBy"))
+
+
+def plan_for(schedule: dict, day: dt.date) -> Optional[dict]:
+    """Return {"label", "on", "off"} for a run day, None when nothing runs.
+
+    The times are alarm and leaveBy: on-the-road time, not downstairs time.
+    """
+    if not is_run_day(schedule, day):
+        return None
     key = DAY_KEYS[day.weekday()]
     entry = schedule["days"].get(key)
-    if not isinstance(entry, dict) or not entry.get("enabled"):
-        return None
-    if not entry.get("alarm") or not entry.get("leaveBy"):
-        return None
+    if not isinstance(entry, dict) or not entry.get("alarm") or not entry.get("leaveBy"):
+        raise ScheduleError(key + " is a run day but has no alarm and leaveBy")
     on = parse_hm(entry["alarm"], key + " alarm")
     off = parse_hm(entry["leaveBy"], key + " leaveBy")
     if off <= on:
