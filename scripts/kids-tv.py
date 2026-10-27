@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Kids' bedroom TVs show the morning board.
 
-On a board day, at the board's alarm time, turn on Dan's Vizio and the girls'
-Vizio and cast the morning board. At on-the-road time, power each one off once.
+On a board day, at the board's alarm time, turn on the two bedroom Vizio TVs
+and cast the morning board. At on-the-road time, power each one off once.
 
 Times come from schedule.json, read fresh on every run. Nothing is hard-coded.
-is_run_day() decides whether today is a run day; today that is schedule.json
-only. No run day means nothing runs.
+is_run_day() decides whether today is a run day: schedule.json, minus any date
+in kids-tv-skip.json. No run day means nothing runs.
 
     kids-tv.py plan [--date YYYY-MM-DD] [--json]   print the times, touch no TV
     kids-tv.py tick                                what launchd runs every minute
@@ -17,7 +17,9 @@ after alarm, one power-off per TV after on-the-road. Each is recorded in a
 state file, so a reboot or a second tick never repeats it. It never checks
 what the TV is doing, so a kid who switches away is left alone.
 
-Tokens come from ~/.config/vizio/<tv>.env and are used only inside this
+Which env file belongs to which TV is local to the mini, in
+~/.config/kids-tv/config.json ("tvs"); the repo only knows the neutral keys
+boys-room and girls-room. Tokens come from ~/.config/vizio/<env file> and are used only inside this
 script. They are never printed, logged, or put on a command line.
 Python 3.9 standard library only. Casting uses the catt binary.
 """
@@ -45,9 +47,11 @@ HOME = Path.home()
 BOARD_URL = "https://davidcasas82.github.io/morning-board/"
 DAY_KEYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 # name -> (env file, key prefix). The files hold <PREFIX>IP and <PREFIX>TOKEN.
+# These are the defaults; the mini's local config (default_config_path) can map a
+# key to a different env file and prefix, so no real name is committed.
 TVS = {
-    "daniel": ("daniel.env", "VIZIO_DANIEL_"),
-    "girls": ("girls.env", "VIZIO_GIRLS_"),
+    "boys-room": ("boys-room.env", "VIZIO_BOYS_ROOM_"),
+    "girls-room": ("girls-room.env", "VIZIO_GIRLS_ROOM_"),
 }
 DEFAULT_TZ = "America/Los_Angeles"
 VIZIO_PORT = 7345
@@ -55,6 +59,7 @@ VIZIO_PORT = 7345
 POWER_CODES = {"on": 1, "off": 0}
 
 MAX_ATTEMPTS = 4  # per TV, per step, per day
+ON_GRACE = dt.timedelta(minutes=15)  # a power-on later than this after alarm is skipped
 OFF_GRACE = dt.timedelta(minutes=20)  # a late power-off after this is skipped
 CAST_SETTLE_SECONDS = 4
 CAST_TRIES = 6
@@ -66,6 +71,10 @@ class ScheduleError(Exception):
 
 
 class TvError(Exception):
+    pass
+
+
+class StateError(Exception):
     pass
 
 
@@ -97,15 +106,92 @@ def parse_hm(value, what: str) -> dt.time:
     return dt.time(int(value[:2]), int(value[3:]))
 
 
+def default_config_path() -> Path:
+    return Path(os.environ.get("KIDS_TV_CONFIG", HOME / ".config" / "kids-tv" / "config.json"))
+
+
+def load_local_config(path) -> dict:
+    """The mini-local config: {"tvs": {"<key>": {"env_file": ..., "prefix": ...}}}.
+
+    Missing means defaults. It holds no tokens, only which env file is which TV.
+    """
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        raise ScheduleError("local config is unreadable or not valid JSON")
+    if not isinstance(data, dict):
+        raise ScheduleError("local config is not an object")
+    return data
+
+
+def apply_local_config(config: dict) -> None:
+    tvs = config.get("tvs", {})
+    if not isinstance(tvs, dict):
+        raise ScheduleError("local config tvs is not an object")
+    for key, spec in tvs.items():
+        if key not in TVS:
+            raise ScheduleError("local config names an unknown TV key")
+        if (not isinstance(spec, dict) or not isinstance(spec.get("env_file"), str)
+                or not isinstance(spec.get("prefix"), str)
+                or not re.fullmatch(r"[A-Za-z0-9._-]+", spec["env_file"])
+                or not re.fullmatch(r"[A-Z0-9_]+", spec["prefix"])):
+            raise ScheduleError("local config has a bad TV entry for " + key)
+        TVS[key] = (spec["env_file"], spec["prefix"])
+
+
+def default_skip_path() -> Path:
+    return Path(os.environ.get("KIDS_TV_SKIP", ROOT / "kids-tv-skip.json"))
+
+
+def load_skip_dates(path) -> set:
+    """Dates the TVs stay off, from {"skipDates": ["YYYY-MM-DD", ...]}.
+
+    A missing file means no skips. A file that is unreadable or malformed
+    raises ScheduleError: the run is logged as an error and nothing runs that
+    day, because the TVs staying off is the safe direction.
+    """
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return set()
+    except OSError:
+        raise ScheduleError("cannot read skip file")
+    try:
+        data = json.loads(text)
+    except ValueError:
+        raise ScheduleError("skip file is not valid JSON, so nothing runs")
+    dates = data.get("skipDates") if isinstance(data, dict) else None
+    if not isinstance(dates, list):
+        raise ScheduleError("skip file has no skipDates list, so nothing runs")
+    out = set()
+    for item in dates:
+        try:
+            if not isinstance(item, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", item):
+                raise ValueError
+            out.add(dt.date.fromisoformat(item))
+        except ValueError:
+            raise ScheduleError("skip file has a date that is not YYYY-MM-DD, so nothing runs")
+    return out
+
+
 def schedule_zone(schedule: dict) -> ZoneInfo:
-    return ZoneInfo(schedule.get("timezone") or DEFAULT_TZ)
+    name = schedule.get("timezone") or DEFAULT_TZ
+    try:
+        return ZoneInfo(name)
+    except (KeyError, ValueError, TypeError, OSError):
+        raise ScheduleError("schedule timezone is not a known zone")
 
 
-def is_run_day(schedule: dict, day: dt.date) -> bool:
+def is_run_day(schedule: dict, day: dt.date, skip_path=None) -> bool:
     """Is this a day the TVs should run? The only place that decides.
 
     Today: schedule.json says so, meaning the weekday is enabled and has both
-    alarm and leaveBy. That is how the board decides too.
+    alarm and leaveBy, with enabled a real true (that is how the board decides too), and the date is not
+    listed in the skip file (kids-tv-skip.json, read fresh each call; see
+    load_skip_dates for the missing and malformed cases).
 
     To swap in another rule (for example the Kid Rotation calendar's Dad's
     House morning minus no-school days), replace this body, or have it call a
@@ -113,8 +199,10 @@ def is_run_day(schedule: dict, day: dt.date) -> bool:
     decides a run day. On and off times still come from schedule.json, so a
     run day with no alarm and leaveBy in the schedule raises ScheduleError.
     """
+    if day in load_skip_dates(skip_path or default_skip_path()):
+        return False
     entry = schedule["days"].get(DAY_KEYS[day.weekday()])
-    return bool(isinstance(entry, dict) and entry.get("enabled")
+    return bool(isinstance(entry, dict) and entry.get("enabled") is True
                 and entry.get("alarm") and entry.get("leaveBy"))
 
 
@@ -263,27 +351,49 @@ def empty_state(day: dt.date) -> dict:
     return {"date": day.isoformat(), "tvs": {}}
 
 
-def load_state(path, day: dt.date) -> dict:
+def acted_state(day: dt.date) -> dict:
+    """A state that says every step was already done, so nothing is sent today."""
+    return {"date": day.isoformat(), "note": "state file was unreadable; nothing sent",
+            "tvs": {n: {"power_on_done": "unknown", "cast_done": "unknown", "off_done": "unknown"}
+                    for n in TVS}}
+
+
+def load_state(path, day: dt.date):
+    """Return (state, damaged). Today's state. Missing or from another day: empty. Unreadable or corrupt:
+    treated as already acted, so a damaged file can never cause a repeat send."""
     try:
-        state = json.loads(Path(path).read_text(encoding="utf-8"))
-        if state.get("date") == day.isoformat() and isinstance(state.get("tvs"), dict):
-            return state
-    except (OSError, ValueError, AttributeError):
-        pass
-    return empty_state(day)
+        text = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return empty_state(day), False
+    except OSError:
+        text = None
+    state = None
+    if text is not None:
+        try:
+            state = json.loads(text)
+        except ValueError:
+            state = None
+    if isinstance(state, dict) and isinstance(state.get("tvs"), dict) and isinstance(state.get("date"), str):
+        return (state if state["date"] == day.isoformat() else empty_state(day)), False
+    return acted_state(day), True
 
 
 def save_state(path, state: dict) -> None:
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=1, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(state, indent=1, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        raise StateError("cannot write state file (%s)" % exc.__class__.__name__)
 
 
 def decide(on_at: dt.datetime, off_at: dt.datetime, now: dt.datetime, st: dict) -> Optional[str]:
     """The one step a TV is due for right now: "on", "cast", "off" or None."""
     if st.get("off_done") or st.get("off_tries", 0) >= MAX_ATTEMPTS:
+        return None
+    if st.get("on_skipped"):
         return None
     if now >= off_at:
         if st.get("power_on_done") and now < off_at + OFF_GRACE:
@@ -292,10 +402,43 @@ def decide(on_at: dt.datetime, off_at: dt.datetime, now: dt.datetime, st: dict) 
     if now < on_at:
         return None
     if not st.get("power_on_done"):
+        if now >= on_at + ON_GRACE:
+            return "skip_on"
         return "on" if st.get("on_tries", 0) < MAX_ATTEMPTS else None
     if not st.get("cast_done") and st.get("cast_tries", 0) < MAX_ATTEMPTS:
         return "cast"
     return None
+
+
+DONE_KEY = {"on": "power_on_done", "cast": "cast_done", "off": "off_done"}
+SENT_TEXT = {"on": "power on sent", "cast": "cast sent", "off": "power off sent"}
+
+
+def attempt(name: str, step: str, st: dict, now: dt.datetime, state_path, state: dict,
+            actions: Dict[str, Callable], log: Callable) -> bool:
+    """Run one step, writing the intent to the state file BEFORE acting.
+
+    If the state cannot be written, StateError is raised and nothing is sent. The
+    step is marked done first and unmarked only when the TV reports a failure,
+    so a crash or a failed write afterwards can never repeat a send.
+    Returns True when the step went out.
+    """
+    st[DONE_KEY[step]] = now.isoformat()
+    st[step + "_tries"] = st.get(step + "_tries", 0) + 1
+    save_state(state_path, state)
+    try:
+        actions[step](name)
+    except TvError as exc:
+        st.pop(DONE_KEY[step], None)
+        log("%s: %s failed, try %d of %d: %s" % (name, step, st[step + "_tries"], MAX_ATTEMPTS, exc))
+        try:
+            save_state(state_path, state)
+        except StateError:
+            st[DONE_KEY[step]] = now.isoformat()  # unknown on disk: stay on the safe side
+            raise
+        return False
+    log("%s: %s" % (name, SENT_TEXT[step]))
+    return True
 
 
 def tick(schedule: dict, now: dt.datetime, state_path, actions: Dict[str, Callable],
@@ -307,44 +450,37 @@ def tick(schedule: dict, now: dt.datetime, state_path, actions: Dict[str, Callab
         return 0
     on_at = dt.datetime.combine(day, plan["on"], tzinfo=now.tzinfo)
     off_at = dt.datetime.combine(day, plan["off"], tzinfo=now.tzinfo)
-    state = load_state(state_path, day)
+    state, corrupt = load_state(state_path, day)
     failures = 0
-    for name in TVS:
-        st = state["tvs"].setdefault(name, {})
-        step = decide(on_at, off_at, now, st)
-        if step is None:
-            continue
-        if dry_run:
-            print("%s: would %s" % (name, step))
-            continue
-        try:
-            if step == "on":
-                actions["on"](name)
-                st["power_on_done"] = now.isoformat()
-                log("%s: power on sent" % name)
-            elif step == "cast":
-                actions["cast"](name)
-                st["cast_done"] = now.isoformat()
-                log("%s: cast sent" % name)
-            else:
-                actions["off"](name)
-                st["off_done"] = now.isoformat()
-                log("%s: power off sent" % name)
-        except TvError as exc:
-            st[step + "_tries"] = st.get(step + "_tries", 0) + 1
-            failures += 1
-            log("%s: %s failed, try %d of %d: %s" % (name, step, st[step + "_tries"], MAX_ATTEMPTS, exc))
-        if step == "on" and st.get("power_on_done"):
-            # Power-on went out, so cast now in the same run; a miss retries next tick.
-            try:
-                actions["cast"](name)
-                st["cast_done"] = now.isoformat()
-                log("%s: cast sent" % name)
-            except TvError as exc:
-                st["cast_tries"] = st.get("cast_tries", 0) + 1
+    try:
+        if corrupt and not dry_run:
+            save_state(state_path, state)  # so today is marked acted, and tomorrow recovers
+            log("error: state file is unreadable, so nothing is sent today")
+        for name in TVS:
+            st = state["tvs"].setdefault(name, {})
+            step = decide(on_at, off_at, now, st)
+            if step is None:
+                continue
+            if step == "skip_on":
+                if dry_run:
+                    print("%s: would skip power-on, more than %d minutes past alarm" % (name, ON_GRACE.seconds // 60))
+                    continue
+                st["on_skipped"] = now.isoformat()
+                save_state(state_path, state)
+                log("%s: power-on skipped, more than %d minutes past alarm" % (name, ON_GRACE.seconds // 60))
+                continue
+            if dry_run:
+                print("%s: would %s" % (name, step))
+                continue
+            if not attempt(name, step, st, now, state_path, state, actions, log):
                 failures += 1
-                log("%s: cast failed, try %d of %d: %s" % (name, st["cast_tries"], MAX_ATTEMPTS, exc))
-        save_state(state_path, state)
+            elif step == "on":
+                # Power-on went out, so cast now in the same run; a miss retries next tick.
+                if not attempt(name, "cast", st, now, state_path, state, actions, log):
+                    failures += 1
+    except StateError as exc:
+        log("error: %s, so nothing more is sent today" % exc)
+        return failures + 1
     return failures
 
 
@@ -354,6 +490,7 @@ def tick(schedule: dict, now: dt.datetime, state_path, actions: Dict[str, Callab
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Kids' bedroom TVs show the morning board.")
     p.add_argument("--schedule", default=None, help="schedule.json (default: this repo's)")
+    p.add_argument("--config", default=None, help="local config (default: ~/.config/kids-tv/config.json)")
     p.add_argument("--config-dir", default=str(HOME / ".config" / "vizio"))
     p.add_argument("--state", default=str(HOME / "Library" / "Application Support" / "morning-board" / "kids-tv-state.json"))
     p.add_argument("--log", default=str(HOME / "Library" / "Logs" / "kids-tv-morning-board.log"))
@@ -394,6 +531,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     log = Log(args.log)
     schedule_path = args.schedule or default_schedule_path()
     try:
+        apply_local_config(load_local_config(args.config or default_config_path()))
         if args.cmd == "plan":
             schedule = load_schedule(schedule_path)
             day = dt.date.fromisoformat(args.date) if args.date else dt.datetime.now(schedule_zone(schedule)).date()
