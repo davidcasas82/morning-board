@@ -42,12 +42,14 @@ _NO_SKIP_DIR = tempfile.TemporaryDirectory()
 
 
 def setUpModule():
-    # Other tests must not read the repo's real skip file.
+    # Other tests must not read the repo's real skip file or the mini's real local config.
     os.environ["KIDS_TV_SKIP"] = str(Path(_NO_SKIP_DIR.name, "none.json"))
+    os.environ["KIDS_TV_CONFIG"] = str(Path(_NO_SKIP_DIR.name, "no-config.json"))
 
 
 def tearDownModule():
     os.environ.pop("KIDS_TV_SKIP", None)
+    os.environ.pop("KIDS_TV_CONFIG", None)
     _NO_SKIP_DIR.cleanup()
 
 
