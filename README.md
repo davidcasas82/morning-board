@@ -35,6 +35,8 @@ From another machine on the LAN, open `http://<mini>:8780/`. The CSV sync Launch
 
 `scripts/kids-tv.py` turns on the two bedroom Vizio TVs at the board's alarm time, casts the board to them, and powers each off once at on-the-road time (not downstairs time). It reads `schedule.json` fresh on every run, so a schedule change carries over. A day whose `enabled` is not a real `true`, or that has no alarm or leaveBy, runs nothing. A date listed in `kids-tv-skip.json` (`{"skipDates": ["2026-10-30"]}`, read fresh each run) also runs nothing; a missing file means no skips, and a malformed one logs an error and runs nothing that day. It does not touch the board, the frame or the TCL TV.
 
+The power-off first stops the cast: it quits the receiver app and waits, 15 seconds at most, until the receiver is idle, because a TV powered off while the board is still casting can turn itself back on. It then powers off and reads the power state 5, 30, 60 and 90 seconds later. If the TV is back on, it stops the cast and powers off again, up to three power-offs in all. If the TV is still on after the third, it logs an `ERROR` and exits nonzero; a later tick does not try again. That 90-second check is the only time the job reads a TV's state after turning it on.
+
 ```
 python3 scripts/kids-tv.py plan --date 2026-10-29   # print the times, touch no TV
 python3 scripts/kids-tv.py tick --dry-run            # print what is due now, send nothing
