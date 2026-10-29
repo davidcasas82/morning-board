@@ -28,8 +28,8 @@ tick, and a manual command waits up to 120 s, then gives up with exit 1.
 
 With a "sonos" block in the local config, tick also keeps the two kids' rooms'
 Sonos alarms in step with the next run day (each evening from 20:30) and, on a
-run day, checks from alarm to 2 minutes after that each room played. See the
-Sonos section below.
+run day, watches each room from 1 minute before alarm to 2 minutes after it
+and, if it never played, sends Play once and alerts. See the Sonos section below.
 
 Which env file belongs to which TV is local to the mini, in
 ~/.config/kids-tv/config.json ("tvs", and optionally "run_days_path" and
@@ -104,10 +104,14 @@ CAST_INFO_PORT = 8008
 TV_MDNS: Dict[str, str] = {}  # TV key -> advertised mDNS name, from the local config only
 
 IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+MAC = re.compile(r"(?<![0-9A-Fa-f:-])(?:[0-9A-Fa-f]{2}([:-]))(?:[0-9A-Fa-f]{2}\1){4}[0-9A-Fa-f]{2}(?![0-9A-Fa-f:-])")
+SONOS_UID = re.compile(r"\bRINCON_[0-9A-Fa-f]{12}")  # a Sonos player ID carries its MAC
 IPV6_CANDIDATE = re.compile(r"(?<![\w:.])[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*(?:%\w+)?(?![\w:])")
 
 
 def redact_ips(text: str) -> str:
+    """Addresses out of logged text: IPv4, IPv6, and MAC addresses (also inside a Sonos RINCON_ ID)."""
+    text = SONOS_UID.sub("RINCON_<mac>", MAC.sub("<mac>", text))
     return IPV4.sub("<ip>", IPV6_CANDIDATE.sub(_ipv6_or_same, text))
 
 
@@ -994,7 +998,8 @@ def report_error_once(message: str, day: dt.date, marker_path, log: Callable) ->
 #   {"sonos": {"backup": "~/.config/kids-sonos/alarms-backup-YYYYMMDD.json",
 #              "rooms": {"boys-room": {"room": "<Sonos room name>", "ip": "<address>",
 #                                      "alarm_id": "<optional ID>"},
-#                        "girls-room": {...}}}}
+#                        "girls-room": {...}},
+#              "play_check": true}}   # optional; false: the morning check alerts but never sends Play
 #
 # Room names and addresses live only there. The job writes only the one alarm
 # it owns per room: the configured alarm_id, else the ID it saved in
@@ -1009,6 +1014,9 @@ SONOS_SYNC_AT = dt.time(20, 30)  # the evening sync runs on the first tick at or
 SONOS_SYNC_GIVE_UP = dt.time(23, 0)  # an undecidable tomorrow is retried each tick until this
 SONOS_CHECK_AFTER = dt.timedelta(minutes=2)  # from alarm to this after it, each room should play
 SONOS_PLAY_SETTLE_SECONDS = 3
+SONOS_WATCH_BEFORE = dt.timedelta(minutes=1)  # the morning watch starts this long before alarm
+SONOS_POLL_SECONDS = 5  # within a tick, a watched room is read this often
+SONOS_TICK_BUDGET = 50  # seconds after a tick read the clock that it may keep polling (launchd runs it every 60)
 ALARM_CLOCK = ("/AlarmClock/Control", "urn:schemas-upnp-org:service:AlarmClock:1")
 AV_TRANSPORT = ("/MediaRenderer/AVTransport/Control", "urn:schemas-upnp-org:service:AVTransport:1")
 ALARM_FIELDS = ("StartLocalTime", "Duration", "Recurrence", "Enabled", "RoomUUID", "ProgramURI",
@@ -1038,7 +1046,10 @@ def apply_sonos_config(block) -> None:
         if alarm_id is not None and not (isinstance(alarm_id, str) and alarm_id.isdigit()):
             raise ScheduleError("local config has a bad sonos alarm_id for " + key)
         rooms[key] = {"room": spec["room"], "ip": spec["ip"], "alarm_id": alarm_id}
-    sonos_config = {"backup": block["backup"], "rooms": rooms}
+    play_check = block.get("play_check", True)
+    if not isinstance(play_check, bool):
+        raise ScheduleError("local config sonos play_check must be true or false")
+    sonos_config = {"backup": block["backup"], "rooms": rooms, "play_check": play_check}
 
 
 def sonos_day(day: dt.date) -> str:
@@ -1161,7 +1172,7 @@ def alarm_text(want: dict) -> str:
 
 
 def sync_room_alarm(sp: Speaker, template: dict, alarm_time: Optional[dt.time], day: dt.date,
-                    record_path, configured_id: Optional[str] = None) -> str:
+                    record_path, configured_id: Optional[str] = None, now: Optional[dt.datetime] = None) -> str:
     """Make the room's owned alarm right for `day`: on at alarm_time for that weekday only, or off (None).
 
     The owned alarm is configured_id, else the ID saved in the record, else
@@ -1178,7 +1189,7 @@ def sync_room_alarm(sp: Speaker, template: dict, alarm_time: Optional[dt.time], 
         want = {"Enabled": "1", "StartLocalTime": alarm_time.strftime("%H:%M:00"), "Recurrence": "ON_" + sonos_day(day)}
     record = load_owned_alarms(record_path)
     entry = record.get(sp.key) if isinstance(record.get(sp.key), dict) else {}
-    stamp = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    stamp = (now or dt.datetime.now().astimezone()).isoformat(timespec="seconds")
     if entry.get("creating") and not configured_id:
         raise SonosError("%s: an alarm create started %s was never confirmed; check the room's alarms and "
                          "set alarm_id in the local config" % (sp.key, entry["creating"]))
@@ -1250,31 +1261,86 @@ def room_is_playing(sp: Speaker, log: Callable) -> bool:
         return False
 
 
-def play_silent_room(sp: Speaker, now: dt.datetime, alert_path, log: Callable) -> int:
-    """The room never played from alarm to 2 minutes after: send Play once and alert."""
+def play_silent_room(sp: Speaker, now: dt.datetime, alert_path, log: Callable, reads: int = 0,
+                     play: bool = True) -> int:
+    """The room never played from 1 minute before alarm to 2 minutes after: send Play once
+    (unless the play check is off) and alert either way."""
+    missed = "room did not play in the %d min after alarm (%d reads, none playing)" % (
+        SONOS_CHECK_AFTER.seconds // 60, reads)
+    if not play:
+        write_alert(alert_path, now.date(), sp.key, "sonos", missed + "; play_check is off, so no Play sent", now, log)
+        return 1
     try:
         sp.play()
         time.sleep(SONOS_PLAY_SETTLE_SECONDS)
         after = sp.transport_state()
-        error = "room did not play in the %d min after alarm; Play sent, now %s" % (
-            SONOS_CHECK_AFTER.seconds // 60, after or "unknown")
+        error = "%s; Play sent, now %s" % (missed, after or "unknown")
         failed = 0 if after == "PLAYING" else 1
     except SonosError as exc:
-        error, failed = "room did not play in the %d min after alarm; %s" % (SONOS_CHECK_AFTER.seconds // 60, exc), 1
+        error, failed = "%s; %s" % (missed, exc), 1
     write_alert(alert_path, now.date(), sp.key, "sonos", error, now, log)
     return failed
 
 
+def check_done(entry) -> bool:
+    """A room's morning check is settled: ok, play_sent, alerted (or "unknown" from a damaged file).
+    A {"watch": ..., "reads": n} entry is a watch still going."""
+    return bool(entry) and not (isinstance(entry, dict) and set(entry) <= {"watch", "reads"})
+
+
+def watch_rooms(keys: List[str], speaker: Callable, state: dict, state_path, now: dt.datetime,
+                watch_to: dt.datetime, log: Callable, poll_from: Optional[float]) -> None:
+    """Read each room's transport state; any PLAYING marks it OK for the day.
+
+    Without poll_from, one read per room. With it (the monotonic time `now` was
+    read), keep reading every SONOS_POLL_SECONDS while some room is unsettled,
+    until watch_to or SONOS_TICK_BUDGET after poll_from, whichever is first. The
+    read count is kept in the state, so the watch carries across ticks."""
+    pending = list(keys)
+    sp = {key: speaker(key) for key in keys}
+    logged = set()
+
+    def once(message):  # a room that does not answer is logged once per tick, not every 5 s
+        key = message.split(":")[0]
+        if key not in logged:
+            logged.add(key)
+            log(message)
+
+    while True:
+        wall = now if poll_from is None else now + dt.timedelta(seconds=time.monotonic() - poll_from)
+        for key in list(pending):
+            if room_is_playing(sp[key], once):
+                state["check"][key] = {"ok": wall.isoformat()}
+                pending.remove(key)
+                save_state(state_path, state)
+                log("%s: sonos playing after alarm" % key)
+            else:
+                entry = state["check"].setdefault(key, {"watch": wall.isoformat()})
+                entry["reads"] = entry.get("reads", 0) + 1
+        if not pending or poll_from is None:
+            break
+        if (time.monotonic() + SONOS_POLL_SECONDS > poll_from + SONOS_TICK_BUDGET
+                or wall + dt.timedelta(seconds=SONOS_POLL_SECONDS) >= watch_to):
+            break
+        time.sleep(SONOS_POLL_SECONDS)
+    if pending:
+        save_state(state_path, state)
+
+
 def sonos_tick(schedule: dict, now: dt.datetime, state_path, alert_path, log: Callable,
                dry_run: bool = False, report: Optional[Callable] = None,
-               speaker: Optional[Callable] = None) -> int:
+               speaker: Optional[Callable] = None, poll_from: Optional[float] = None) -> int:
     """The Sonos part of a tick. Returns the number of failed steps; never raises.
 
-    Morning, on a run day: every tick from alarm until SONOS_CHECK_AFTER
-    after it, read each room's transport state. A room seen PLAYING once is
-    marked OK and left alone for the day, even if it stops later. On the first
-    tick at or after alarm + SONOS_CHECK_AFTER (before ON_GRACE), a room never
-    seen playing gets one last read, then one Play and an alert.
+    Morning, on a run day: from SONOS_WATCH_BEFORE before alarm until
+    SONOS_CHECK_AFTER after it, watch each room's transport state (watch_rooms:
+    every SONOS_POLL_SECONDS for the rest of the tick when poll_from is given,
+    after the TV part). Any PLAYING reading marks the room OK and leaves it
+    alone for the day, even a short play that stopped. Each room holds its own
+    lock (kids-tv-sonos-<key>.lock) while it is watched or played; a locked
+    room is skipped that tick. On the first tick at or after alarm +
+    SONOS_CHECK_AFTER (before ON_GRACE), a room never seen playing gets one
+    last read, then one Play (only if play_check, default on) and an alert.
     Evening: from SONOS_SYNC_AT, once per room per day, set each room's alarm
     for tomorrow (sync_room_alarm): on at tomorrow's alarm if tomorrow is a run
     day (is_run_day: schedule, run-days file and skip list), off if not. If
@@ -1303,22 +1369,9 @@ def sonos_tick(schedule: dict, now: dt.datetime, state_path, alert_path, log: Ca
             plan = None  # the TV part reports today's schedule errors
         if plan:
             alarm_at = dt.datetime.combine(day, plan["on"], tzinfo=now.tzinfo)
-            if alarm_at <= now < alarm_at + ON_GRACE:
-                for key in rooms:
-                    if state["check"].get(key):
-                        continue  # seen playing, or already handled, today
-                    if dry_run:
-                        print("%s: would check the Sonos room is playing" % key)
-                        continue
-                    sp = speaker(key)
-                    if room_is_playing(sp, log):
-                        state["check"][key] = {"ok": now.isoformat()}
-                        save_state(state_path, state)
-                        log("%s: sonos playing after alarm" % key)
-                    elif now >= alarm_at + SONOS_CHECK_AFTER:
-                        state["check"][key] = {"play_sent": now.isoformat()}
-                        save_state(state_path, state)
-                        failures += play_silent_room(sp, now, alert_path, log)
+            if alarm_at - SONOS_WATCH_BEFORE <= now < alarm_at + ON_GRACE:
+                failures += sonos_morning(alarm_at, now, state, state_path, alert_path, log, dry_run,
+                                          speaker, poll_from)
         if now.time() >= SONOS_SYNC_AT:
             failures += sonos_evening_sync(schedule, now, state, state_path, alert_path, log, dry_run, speaker)
     except StateError as exc:
@@ -1327,6 +1380,39 @@ def sonos_tick(schedule: dict, now: dt.datetime, state_path, alert_path, log: Ca
     except (SonosError, http.client.HTTPException, OSError) as exc:  # a last guard: never break the tick
         report("sonos: %s" % redact_ips(describe_error(exc)))
         return failures + 1
+    return failures
+
+
+def sonos_morning(alarm_at, now, state, state_path, alert_path, log, dry_run, speaker, poll_from) -> int:
+    watch_to = alarm_at + SONOS_CHECK_AFTER
+    keys = [k for k in sonos_config["rooms"] if not check_done(state["check"].get(k))]
+    if dry_run:
+        for key in keys:
+            print("%s: would check the Sonos room is playing" % key)
+        return 0
+    failures = 0
+    with contextlib.ExitStack() as locks:
+        held = []
+        for key in keys:
+            if locks.enter_context(tv_lock(Path(state_path).parent, "sonos-" + key)):
+                held.append(key)
+            else:
+                log("%s: another kids-tv command is watching this room; skipped this tick" % key)
+        if now < watch_to:
+            watch_rooms(held, speaker, state, state_path, now, watch_to, log, poll_from)
+            return 0
+        for key in held:  # the window is over: one last read, then Play and alert if never seen playing
+            sp = speaker(key)
+            reads = (state["check"].get(key) or {}).get("reads", 0)
+            if room_is_playing(sp, log):
+                state["check"][key] = {"ok": now.isoformat()}
+                save_state(state_path, state)
+                log("%s: sonos playing after alarm" % key)
+                continue
+            play = sonos_config.get("play_check", True)
+            state["check"][key] = {"play_sent" if play else "alerted": now.isoformat(), "reads": reads + 1}
+            save_state(state_path, state)
+            failures += play_silent_room(sp, now, alert_path, log, reads + 1, play)
     return failures
 
 
@@ -1375,7 +1461,7 @@ def sonos_evening_sync(schedule, now, state, state_path, alert_path, log, dry_ru
             if template is None:
                 raise SonosError("%s: the sonos alarm backup has no alarm for this room" % key)
             result = sync_room_alarm(speaker(key), template, alarm_time, tomorrow, sonos_alarms_path(state_path),
-                                     rooms[key].get("alarm_id"))
+                                     rooms[key].get("alarm_id"), now=now)
         except SonosError as exc:
             failures += 1
             log("%s: sonos alarm for %s failed, try %d of %d: %s" % (key, tomorrow.isoformat(), st["tries"],
@@ -1471,6 +1557,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             schedule = load_schedule(schedule_path)
             zone = schedule_zone(schedule)
             now = dt.datetime.fromisoformat(args.now).replace(tzinfo=zone) if args.now else dt.datetime.now(zone)
+            poll_from = time.monotonic()  # the Sonos watch polls until SONOS_TICK_BUDGET after this
             error_day = now.date()
             alert_path = args.alert or default_alert_path()
             tv_error = None
@@ -1481,7 +1568,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 tv_error, failed = exc, 1
             # The Sonos part runs even when today's TV part could not (it may be about tomorrow).
             failed += sonos_tick(schedule, now, sonos_state_path(args), alert_path, log, dry_run=args.dry_run,
-                                 report=lambda m: report_error_once(m, error_day, error_marker_path(args), log))
+                                 report=lambda m: report_error_once(m, error_day, error_marker_path(args), log),
+                                 poll_from=poll_from)
             if tv_error is not None:
                 raise tv_error
             return 1 if failed else 0
@@ -1516,7 +1604,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         log("%s: manual %s sent" % (name, step))
                         print("%s: %s sent" % (name, step))
         return 1 if failed else 0
-    except (ScheduleError, TvError, ValueError) as exc:
+    except (ScheduleError, TvError, ValueError, StateError) as exc:  # StateError: a TV lock file cannot be opened
         if args.cmd == "tick":
             report_error_once(str(exc), error_day, error_marker_path(args), log)
         else:
