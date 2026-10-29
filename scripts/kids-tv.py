@@ -22,9 +22,14 @@ power state only for the 90 s after a power-off, to check the off stuck, so a
 kid who switches away is left alone. A first failed power-on, or an off that
 does not stick, is written to the alert file at once (see write_alert).
 
+Only one kids-tv.py command acts on a TV at a time (a lock file per TV,
+kids-tv-<key>.lock beside the state file): tick skips a locked TV for that
+tick, and a manual command waits up to 120 s, then gives up with exit 1.
+
 With a "sonos" block in the local config, tick also keeps the two kids' rooms'
-Sonos alarms in step with the next run day (each evening from 20:30) and checks
-2 minutes after alarm that each room is playing. See the Sonos section below.
+Sonos alarms in step with the next run day (each evening from 20:30) and, on a
+run day, checks from alarm to 2 minutes after that each room played. See the
+Sonos section below.
 
 Which env file belongs to which TV is local to the mini, in
 ~/.config/kids-tv/config.json ("tvs", and optionally "run_days_path" and
@@ -38,7 +43,11 @@ Python 3.9 standard library only. Casting uses the catt binary.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
+import fcntl
+import http.client
+import ipaddress
 import json
 import os
 import re
@@ -95,11 +104,22 @@ CAST_INFO_PORT = 8008
 TV_MDNS: Dict[str, str] = {}  # TV key -> advertised mDNS name, from the local config only
 
 IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-IPV6 = re.compile(r"\b(?:[0-9A-Fa-f]{1,4}:){3,7}[0-9A-Fa-f]{1,4}\b")
+IPV6_CANDIDATE = re.compile(r"(?<![\w:.])[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*(?:%\w+)?(?![\w:])")
 
 
 def redact_ips(text: str) -> str:
-    return IPV6.sub("<ip>", IPV4.sub("<ip>", text))
+    return IPV4.sub("<ip>", IPV6_CANDIDATE.sub(_ipv6_or_same, text))
+
+
+def _ipv6_or_same(match) -> str:
+    """Redact a real IPv6 address, short forms like fe80::1 included; leave times like 06:00:00."""
+    text = match.group(0)
+    core = text.rstrip(".")  # a full stop after an address is not part of it
+    try:
+        ipaddress.IPv6Address(core.split("%")[0])
+    except ValueError:
+        return text
+    return "<ip>" + text[len(core):]
 
 
 def describe_error(exc: BaseException) -> str:
@@ -447,23 +467,39 @@ class OffDidNotStick(TvError):
 
 def mdns_lookup(name: str) -> Optional[str]:
     """The address of the TV advertising `name` on _viziocast._tcp, or None. Uses macOS dns-sd."""
+    out = run_for_output(["dns-sd", "-L", name, MDNS_SERVICE, "local"])
+    match = re.search(r"can be reached at (\S+?)\.?:\d+", out or "")
+    if not match:
+        return None
+    return resolve_host(match.group(1))
+
+
+def resolve_host(host: str) -> Optional[str]:
+    """IPv4 address of an mDNS host name, or None, within MDNS_SECONDS (dns-sd -G; never an
+    unbounded getaddrinfo)."""
+    if IPV4.fullmatch(host):
+        return host
+    out = run_for_output(["dns-sd", "-G", "v4", host])
+    for line in (out or "").splitlines():
+        if " Add " in line:
+            found = IPV4.search(line.split(host, 1)[-1])
+            if found:
+                return found.group(0)
+    return None
+
+
+def run_for_output(cmd: List[str]) -> Optional[str]:
+    """What a never-exiting dns-sd printed in MDNS_SECONDS (it is stopped then), or None."""
     try:
-        done = subprocess.run(["dns-sd", "-L", name, MDNS_SERVICE, "local"], stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, timeout=MDNS_SECONDS)
+        done = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=MDNS_SECONDS)
         out = done.stdout
-    except subprocess.TimeoutExpired as exc:  # dns-sd never exits by itself
+    except subprocess.TimeoutExpired as exc:
         out = exc.stdout
     except OSError:
         return None
     if isinstance(out, bytes):
         out = out.decode("utf-8", "replace")
-    match = re.search(r"can be reached at (\S+?)\.?:\d+", out or "")
-    if not match:
-        return None
-    try:
-        return socket.gethostbyname(match.group(1))
-    except OSError:
-        return None
+    return out
 
 
 class Tv:
@@ -523,7 +559,7 @@ class Tv:
         try:
             with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
                 payload = json.loads(resp.read().decode() or "{}")
-        except (urllib.error.URLError, OSError, ValueError) as exc:
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
             message = "%s: request failed: %s" % (self.name, self._scrub(describe_error(exc)))
             if is_unreachable(exc):
                 raise TvUnreachable(message)
@@ -716,6 +752,38 @@ def save_state(path, state: dict) -> None:
         raise StateError("cannot write state file (%s)" % exc.__class__.__name__)
 
 
+LOCK_WAIT_SECONDS = 120  # a manual command waits this long for a TV another command is using
+
+
+@contextlib.contextmanager
+def tv_lock(lock_dir, name: str, wait: float = 0.0):
+    """Hold this TV's lock file (fcntl.flock on kids-tv-<key>.lock) for the block.
+
+    Yields True when held, False if another kids-tv.py still has it after
+    `wait` seconds. The lock goes when the process does, even on a crash."""
+    path = Path(lock_dir) / ("kids-tv-%s.lock" % name)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path, "a")
+    except OSError as exc:
+        raise StateError("cannot open the TV lock file (%s)" % exc.__class__.__name__)
+    with handle:
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    yield False
+                    return
+                time.sleep(1)
+        try:
+            yield True
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def decide(on_at: dt.datetime, off_at: dt.datetime, now: dt.datetime, st: dict) -> Optional[str]:
     """The one step a TV is due for right now: "on", "cast", "off" or None."""
     if st.get("off_done") or st.get("off_tries", 0) >= MAX_ATTEMPTS:
@@ -867,12 +935,16 @@ def tick(schedule: dict, now: dt.datetime, state_path, actions: Dict[str, Callab
             if dry_run:
                 print("%s: would %s" % (name, step))
                 continue
-            if not attempt(name, step, st, now, state_path, state, actions, log, alert_path):
-                failures += 1
-            elif step == "on":
-                # Power-on went out, so cast now in the same run; a miss retries next tick.
-                if not attempt(name, "cast", st, now, state_path, state, actions, log, alert_path):
+            with tv_lock(Path(state_path).parent, name) as held:
+                if not held:
+                    log("%s: another kids-tv command is using this TV; %s skipped this tick" % (name, step))
+                    continue
+                if not attempt(name, step, st, now, state_path, state, actions, log, alert_path):
                     failures += 1
+                elif step == "on":
+                    # Power-on went out, so cast now in the same run; a miss retries next tick.
+                    if not attempt(name, "cast", st, now, state_path, state, actions, log, alert_path):
+                        failures += 1
     except StateError as exc:
         state_error("%s, so nothing more is sent today" % exc)
         return failures + 1
@@ -920,17 +992,22 @@ def report_error_once(message: str, day: dt.date, marker_path, log: Callable) ->
 # 1400 (standard library only; /usr/bin/python3 has no soco):
 #
 #   {"sonos": {"backup": "~/.config/kids-sonos/alarms-backup-YYYYMMDD.json",
-#              "rooms": {"boys-room": {"room": "<Sonos room name>", "ip": "<address>"},
+#              "rooms": {"boys-room": {"room": "<Sonos room name>", "ip": "<address>",
+#                                      "alarm_id": "<optional ID>"},
 #                        "girls-room": {...}}}}
 #
-# Room names and addresses live only there. A room's alarm is found by the
-# room's UUID (from the backup), so no other room's alarm is ever read for a
-# write or changed. Without the block, nothing here runs.
+# Room names and addresses live only there. The job writes only the one alarm
+# it owns per room: the configured alarm_id, else the ID it saved in
+# kids-sonos-alarms.json, else the backup's alarm ID if that alarm is in the
+# room (then saved). If an owned alarm is gone, it alerts and never makes
+# another; it creates one only while it owns none. Without the block, nothing
+# here runs.
 
 SONOS_PORT = 1400
 SONOS_TIMEOUT = 8
 SONOS_SYNC_AT = dt.time(20, 30)  # the evening sync runs on the first tick at or after this
-SONOS_CHECK_AFTER = dt.timedelta(minutes=2)  # after alarm, check each room is playing
+SONOS_SYNC_GIVE_UP = dt.time(23, 0)  # an undecidable tomorrow is retried each tick until this
+SONOS_CHECK_AFTER = dt.timedelta(minutes=2)  # from alarm to this after it, each room should play
 SONOS_PLAY_SETTLE_SECONDS = 3
 ALARM_CLOCK = ("/AlarmClock/Control", "urn:schemas-upnp-org:service:AlarmClock:1")
 AV_TRANSPORT = ("/MediaRenderer/AVTransport/Control", "urn:schemas-upnp-org:service:AVTransport:1")
@@ -957,7 +1034,10 @@ def apply_sonos_config(block) -> None:
             raise ScheduleError("local config sonos names an unknown room key")
         if not isinstance(spec, dict) or not all(isinstance(spec.get(f), str) and spec[f] for f in ("room", "ip")):
             raise ScheduleError("local config has a bad sonos entry for " + key)
-        rooms[key] = {"room": spec["room"], "ip": spec["ip"]}
+        alarm_id = spec.get("alarm_id")
+        if alarm_id is not None and not (isinstance(alarm_id, str) and alarm_id.isdigit()):
+            raise ScheduleError("local config has a bad sonos alarm_id for " + key)
+        rooms[key] = {"room": spec["room"], "ip": spec["ip"], "alarm_id": alarm_id}
     sonos_config = {"backup": block["backup"], "rooms": rooms}
 
 
@@ -993,7 +1073,7 @@ class Speaker:
                 found = None
             raise SonosError("%s: %s failed: HTTP %s%s" % (self.key, action, exc.code,
                                                            " UPnP error " + found.group(1).decode() if found else ""))
-        except (urllib.error.URLError, OSError) as exc:
+        except (urllib.error.URLError, http.client.HTTPException, socket.timeout, OSError) as exc:
             raise SonosError("%s: %s failed: %s" % (self.key, action,
                                                      redact_ips(describe_error(exc).replace(self._ip, "<ip>"))))
         try:
@@ -1049,15 +1129,29 @@ def load_alarm_templates(path) -> Dict[str, dict]:
         raise SonosError("sonos alarm backup is unreadable or missing a field")
 
 
-def find_room_alarm(alarms: List[dict], template: dict) -> Optional[dict]:
-    """This room's alarm: same room UUID, and the backup's ID, else the same source (lowest ID)."""
-    mine = [a for a in alarms if a.get("RoomUUID") == template["RoomUUID"]]
-    for alarm in mine:
-        if alarm.get("ID") == template["ID"]:
+def room_alarm(alarms: List[dict], alarm_id: str, template: dict) -> Optional[dict]:
+    """The alarm with exactly this ID in this room (by room UUID), or None."""
+    for alarm in alarms:
+        if alarm.get("ID") == alarm_id and alarm.get("RoomUUID") == template["RoomUUID"]:
             return alarm
-    same = [a for a in mine if a.get("ProgramURI") == template["ProgramURI"]]
-    same.sort(key=lambda a: int(a["ID"]) if str(a.get("ID", "")).isdigit() else 0)
-    return same[0] if same else None
+    return None
+
+
+def sonos_alarms_path(state_path) -> Path:
+    return Path(state_path).with_name("kids-sonos-alarms.json")
+
+
+def load_owned_alarms(path) -> dict:
+    """Room key -> the alarm this job owns there: {"id", "from", "at"}, or {"creating": time}."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        data = None
+    if not isinstance(data, dict):
+        raise SonosError("the sonos alarm record is unreadable, so no alarm is changed")
+    return data
 
 
 def alarm_text(want: dict) -> str:
@@ -1066,19 +1160,40 @@ def alarm_text(want: dict) -> str:
     return "on %s %s" % (want["StartLocalTime"][:5], want["Recurrence"])
 
 
-def sync_room_alarm(sp: Speaker, template: dict, alarm_time: Optional[dt.time], day: dt.date) -> str:
-    """Make this room's alarm right for `day`: on at alarm_time for that weekday only, or off (None).
+def sync_room_alarm(sp: Speaker, template: dict, alarm_time: Optional[dt.time], day: dt.date,
+                    record_path, configured_id: Optional[str] = None) -> str:
+    """Make the room's owned alarm right for `day`: on at alarm_time for that weekday only, or off (None).
 
-    Only Enabled, StartLocalTime and Recurrence change; every other field of an
-    existing alarm stays as it is. A missing alarm is created from the backup
-    (only when it should be on). Nothing is written when it already matches.
-    Every write is re-read and checked. Returns what happened; raises SonosError.
+    The owned alarm is configured_id, else the ID saved in the record, else
+    the backup's alarm ID if that alarm is in this room (and is then saved).
+    An owned alarm that is gone raises SonosError; nothing is created then.
+    Only while no alarm is owned, and only for an "on", is one created from
+    the backup; its ID is saved (intent first, so a lost answer never makes a
+    second). Only Enabled, StartLocalTime and Recurrence change. Nothing is
+    written when it already matches. Every write is re-read and checked.
     """
     if alarm_time is None:
         want = {"Enabled": "0"}
     else:
         want = {"Enabled": "1", "StartLocalTime": alarm_time.strftime("%H:%M:00"), "Recurrence": "ON_" + sonos_day(day)}
-    current = find_room_alarm(sp.list_alarms(), template)
+    record = load_owned_alarms(record_path)
+    entry = record.get(sp.key) if isinstance(record.get(sp.key), dict) else {}
+    stamp = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    if entry.get("creating") and not configured_id:
+        raise SonosError("%s: an alarm create started %s was never confirmed; check the room's alarms and "
+                         "set alarm_id in the local config" % (sp.key, entry["creating"]))
+    owned = configured_id or (str(entry["id"]) if entry.get("id") else None)
+    alarms = sp.list_alarms()
+    if owned:
+        current = room_alarm(alarms, owned, template)
+        if current is None:
+            raise SonosError("%s: alarm %s that this job owns is gone from the room; not creating another"
+                             % (sp.key, owned))
+    else:
+        current = room_alarm(alarms, template["ID"], template)
+        if current is not None:
+            record[sp.key] = {"id": template["ID"], "from": "backup", "at": stamp}
+            save_state(record_path, record)
     if current is None and alarm_time is None:
         return "no alarm, so nothing to turn off"
     if current is not None and all(current.get(k) == v for k, v in want.items()):
@@ -1086,16 +1201,22 @@ def sync_room_alarm(sp: Speaker, template: dict, alarm_time: Optional[dt.time], 
     if current is None:
         fields = {f: template[f] for f in ALARM_FIELDS}
         fields.update(want)
+        record[sp.key] = {"creating": stamp}
+        save_state(record_path, record)
         target_id, verb = sp.create_alarm(fields), "created from the backup"
+        if not target_id.isdigit():
+            raise SonosError("%s: CreateAlarm gave no alarm ID" % sp.key)
+        record[sp.key] = {"id": target_id, "from": "created", "at": stamp}
+        save_state(record_path, record)
     else:
         fields = {f: current.get(f, "") for f in ALARM_FIELDS}
         fields.update(want)
         target_id, verb = current["ID"], "updated"
         sp.update_alarm(dict(fields, ID=target_id))
-    after = find_room_alarm(sp.list_alarms(), dict(template, ID=target_id))
-    if after is None or after.get("ID") != target_id or any(after.get(k) != v for k, v in want.items()):
+    after = room_alarm(sp.list_alarms(), target_id, template)
+    if after is None or any(after.get(k) != v for k, v in want.items()):
         raise SonosError("%s: alarm %s, but the re-read does not match" % (sp.key, verb))
-    return "%s, re-read: %s" % (verb, alarm_text(after))
+    return "%s (ID %s), re-read: %s" % (verb, target_id, alarm_text(after))
 
 
 def sonos_state_path(args) -> Path:
@@ -1120,21 +1241,26 @@ def load_sonos_state(path, day: dt.date):
             "sync": {k: {"done": "unknown"} for k in rooms}, "check": {k: "unknown" for k in rooms}}, True
 
 
-def check_room_playing(sp: Speaker, now: dt.datetime, alert_path, log: Callable) -> int:
-    """After alarm on a run day: is the room playing? If not, Play, and alert either way."""
+def room_is_playing(sp: Speaker, log: Callable) -> bool:
+    """One read of the room's transport state; a failed read counts as not playing (and is logged)."""
     try:
-        mode = sp.transport_state()
-        if mode == "PLAYING":
-            log("%s: sonos playing after alarm" % sp.key)
-            return 0
+        return sp.transport_state() == "PLAYING"
+    except SonosError as exc:
+        log("%s: sonos state not read: %s" % (sp.key, exc))
+        return False
+
+
+def play_silent_room(sp: Speaker, now: dt.datetime, alert_path, log: Callable) -> int:
+    """The room never played from alarm to 2 minutes after: send Play once and alert."""
+    try:
         sp.play()
         time.sleep(SONOS_PLAY_SETTLE_SECONDS)
         after = sp.transport_state()
-        error = "room was %s %d min after alarm; Play sent, now %s" % (
-            mode or "unknown", SONOS_CHECK_AFTER.seconds // 60, after or "unknown")
+        error = "room did not play in the %d min after alarm; Play sent, now %s" % (
+            SONOS_CHECK_AFTER.seconds // 60, after or "unknown")
         failed = 0 if after == "PLAYING" else 1
     except SonosError as exc:
-        error, failed = str(exc), 1
+        error, failed = "room did not play in the %d min after alarm; %s" % (SONOS_CHECK_AFTER.seconds // 60, exc), 1
     write_alert(alert_path, now.date(), sp.key, "sonos", error, now, log)
     return failed
 
@@ -1144,14 +1270,18 @@ def sonos_tick(schedule: dict, now: dt.datetime, state_path, alert_path, log: Ca
                speaker: Optional[Callable] = None) -> int:
     """The Sonos part of a tick. Returns the number of failed steps; never raises.
 
-    Morning: on a run day, from 2 minutes after alarm until ON_GRACE after
-    alarm, check each room once (check_room_playing).
+    Morning, on a run day: every tick from alarm until SONOS_CHECK_AFTER
+    after it, read each room's transport state. A room seen PLAYING once is
+    marked OK and left alone for the day, even if it stops later. On the first
+    tick at or after alarm + SONOS_CHECK_AFTER (before ON_GRACE), a room never
+    seen playing gets one last read, then one Play and an alert.
     Evening: from SONOS_SYNC_AT, once per room per day, set each room's alarm
     for tomorrow (sync_room_alarm): on at tomorrow's alarm if tomorrow is a run
     day (is_run_day: schedule, run-days file and skip list), off if not. If
     tomorrow cannot be decided (for example the run-days file is stale), the
-    alarm is left as it is and an alert is written. A failed sync is retried
-    on later ticks, up to MAX_ATTEMPTS, with an alert on the first failure.
+    alarm is left as it is and retried each tick until SONOS_SYNC_GIVE_UP,
+    then an alert is written. A failed sync is retried on later ticks, up to
+    MAX_ATTEMPTS, with an alert on the first failure.
     """
     if not sonos_config:
         return 0
@@ -1173,20 +1303,29 @@ def sonos_tick(schedule: dict, now: dt.datetime, state_path, alert_path, log: Ca
             plan = None  # the TV part reports today's schedule errors
         if plan:
             alarm_at = dt.datetime.combine(day, plan["on"], tzinfo=now.tzinfo)
-            if alarm_at + SONOS_CHECK_AFTER <= now < alarm_at + ON_GRACE:
+            if alarm_at <= now < alarm_at + ON_GRACE:
                 for key in rooms:
                     if state["check"].get(key):
-                        continue
+                        continue  # seen playing, or already handled, today
                     if dry_run:
                         print("%s: would check the Sonos room is playing" % key)
                         continue
-                    state["check"][key] = now.isoformat()
-                    save_state(state_path, state)
-                    failures += check_room_playing(speaker(key), now, alert_path, log)
+                    sp = speaker(key)
+                    if room_is_playing(sp, log):
+                        state["check"][key] = {"ok": now.isoformat()}
+                        save_state(state_path, state)
+                        log("%s: sonos playing after alarm" % key)
+                    elif now >= alarm_at + SONOS_CHECK_AFTER:
+                        state["check"][key] = {"play_sent": now.isoformat()}
+                        save_state(state_path, state)
+                        failures += play_silent_room(sp, now, alert_path, log)
         if now.time() >= SONOS_SYNC_AT:
             failures += sonos_evening_sync(schedule, now, state, state_path, alert_path, log, dry_run, speaker)
     except StateError as exc:
         report("sonos: %s, so no Sonos step runs" % exc)
+        return failures + 1
+    except (SonosError, http.client.HTTPException, OSError) as exc:  # a last guard: never break the tick
+        report("sonos: %s" % redact_ips(describe_error(exc)))
         return failures + 1
     return failures
 
@@ -1202,15 +1341,25 @@ def sonos_evening_sync(schedule, now, state, state_path, alert_path, log, dry_ru
     try:
         plan = plan_for(schedule, tomorrow, now)
     except ScheduleError as exc:
+        give_up = now.time() >= SONOS_SYNC_GIVE_UP
         for key in pending:
             if dry_run:
                 print("%s: would leave the Sonos alarm unchanged: %s" % (key, exc))
                 continue
-            state["sync"][key] = {"done": now.isoformat(), "result": "left unchanged"}
+            st = state["sync"].setdefault(key, {})
+            if not give_up:
+                if not st.get("undecided"):  # logged once; retried quietly each tick until SONOS_SYNC_GIVE_UP
+                    st["undecided"] = now.isoformat()
+                    save_state(state_path, state)
+                    log("%s: cannot tell yet whether %s runs (%s); alarm unchanged, retrying until %s"
+                        % (key, tomorrow.isoformat(), exc, hm(SONOS_SYNC_GIVE_UP)))
+                continue
+            state["sync"][key] = dict(st, done=now.isoformat(), result="left unchanged")
             save_state(state_path, state)
             write_alert(alert_path, day, key, "sonos-sync",
-                        "cannot tell whether %s runs (%s); alarm left unchanged" % (tomorrow.isoformat(), exc), now, log)
-        return len(pending) if not dry_run else 0
+                        "cannot tell whether %s runs (%s) by %s; alarm left unchanged"
+                        % (tomorrow.isoformat(), exc, hm(SONOS_SYNC_GIVE_UP)), now, log)
+        return len(pending) if give_up and not dry_run else 0
     alarm_time = plan["on"] if plan else None
     failures = 0
     for key in pending:
@@ -1225,7 +1374,8 @@ def sonos_evening_sync(schedule, now, state, state_path, alert_path, log, dry_ru
             template = load_alarm_templates(sonos_config["backup"]).get(rooms[key]["room"])
             if template is None:
                 raise SonosError("%s: the sonos alarm backup has no alarm for this room" % key)
-            result = sync_room_alarm(speaker(key), template, alarm_time, tomorrow)
+            result = sync_room_alarm(speaker(key), template, alarm_time, tomorrow, sonos_alarms_path(state_path),
+                                     rooms[key].get("alarm_id"))
         except SonosError as exc:
             failures += 1
             log("%s: sonos alarm for %s failed, try %d of %d: %s" % (key, tomorrow.isoformat(), st["tries"],
@@ -1337,23 +1487,35 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 1 if failed else 0
         actions = make_actions(args, log)
         names = list(TVS) if args.tv == "all" else [args.tv]
-        stuck = []
-        for name in names:
-            steps = ["on", "cast"] if args.cmd == "on" else [args.cmd]
-            for step in steps:
-                if args.dry_run:
+        steps = ["on", "cast"] if args.cmd == "on" else [args.cmd]
+        if args.dry_run:
+            for name in names:
+                for step in steps:
                     print("%s: would %s%s" % (name, step, " " + BOARD_URL if step == "cast" else ""))
+            return 0
+        failed = []
+        for name in names:  # a TV that fails never stops the next one
+            with tv_lock(Path(args.state).parent, name, LOCK_WAIT_SECONDS) as held:
+                if not held:
+                    failed.append(name)
+                    message = "%s: another kids-tv command kept this TV busy for %d s; manual %s not sent" % (
+                        name, LOCK_WAIT_SECONDS, args.cmd)
+                    log("ERROR: " + message)
+                    sys.stderr.write("ERROR: %s\n" % message)
                     continue
-                try:
-                    actions[step](name)
-                except OffDidNotStick:
-                    stuck.append(name)  # power_off_verified already logged the ERROR; go on to the next TV
-                    sys.stderr.write("ERROR: %s: off did not stick\n" % name)
-                    continue
-                if step != "status":
-                    log("%s: manual %s sent" % (name, step))
-                    print("%s: %s sent" % (name, step))
-        return 1 if stuck else 0
+                for step in steps:
+                    try:
+                        actions[step](name)
+                    except TvError as exc:
+                        failed.append(name)
+                        if not isinstance(exc, OffDidNotStick):  # power_off_verified already logged that one
+                            log("ERROR: %s" % exc)
+                        sys.stderr.write("ERROR: %s\n" % exc)
+                        break
+                    if step != "status":
+                        log("%s: manual %s sent" % (name, step))
+                        print("%s: %s sent" % (name, step))
+        return 1 if failed else 0
     except (ScheduleError, TvError, ValueError) as exc:
         if args.cmd == "tick":
             report_error_once(str(exc), error_day, error_marker_path(args), log)

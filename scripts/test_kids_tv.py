@@ -49,6 +49,8 @@ _NO_SKIP_DIR = tempfile.TemporaryDirectory()
 # The module's clock: the evening a (made-up) run-days file was written.
 CLOCK = dt.datetime(2026, 10, 28, 21, 0, tzinfo=LA)
 _clock_patch = mock.patch.object(kt, "clock", lambda: CLOCK)
+# Default state, lock and log paths come from kt.HOME: keep them in a temp dir, never the mini's real ones.
+_home_patch = mock.patch.object(kt, "HOME", Path(_NO_SKIP_DIR.name, "home"))
 
 
 def run_days_doc(generated_at, days):
@@ -72,10 +74,12 @@ def setUpModule():
     os.environ["KIDS_TV_RUN_DAYS"] = str(fixture)
     os.environ["KIDS_TV_ALERT"] = str(Path(_NO_SKIP_DIR.name, "alert.json"))  # never the mini's real alert file
     _clock_patch.start()
+    _home_patch.start()
 
 
 def tearDownModule():
     _clock_patch.stop()
+    _home_patch.stop()
     os.environ.pop("KIDS_TV_SKIP", None)
     os.environ.pop("KIDS_TV_CONFIG", None)
     os.environ.pop("KIDS_TV_RUN_DAYS", None)
@@ -395,7 +399,7 @@ class RunDaysTests(unittest.TestCase):
         self.fresh({"2026-10-29": True})
         self.assertFalse(kt.is_run_day(SCHEDULE, FRI, skip, self.path, CLOCK))
 
-    def test_read_fresh_each_call(self):
+    def test_run_days_read_fresh_each_call(self):
         self.fresh({"2026-10-29": False})
         self.assertFalse(self.check())
         self.fresh({"2026-10-29": True})
@@ -971,6 +975,22 @@ class ErrorDetailTests(unittest.TestCase):
         self.assertIn("TimeoutExpired: no answer in 30 s", str(ctx.exception))
         self.assertNotIn(IP, str(ctx.exception))
 
+    def test_ipv6_short_forms_are_redacted_and_times_are_not(self):
+        for text in ("fe80::1", "::1", "fe80::1%en0", "2001:db8::8a2e:370:7334", "2001:db8:0:0:0:0:2:1",
+                     "::ffff:10.1.2.3", "fe80::1%en0.", "10.1.2.3"):
+            self.assertEqual(kt.redact_ips("at %s now" % text), "at <ip>%s now" % ("." if text.endswith(".") else ""), text)
+        for text in ("06:00:00", "2026-11-02T06:00:00-08:00", "ON_145 06:00", "a:b", "07:30:01.123"):
+            self.assertEqual(kt.redact_ips(text), text)
+
+    def test_http_client_errors_are_tv_errors(self):
+        import http.client
+        with mock.patch("urllib.request.urlopen", side_effect=http.client.RemoteDisconnected("closed")):
+            with self.assertRaises(kt.TvUnreachable):
+                self.tv.power_key("on")
+        with mock.patch("urllib.request.urlopen", side_effect=http.client.BadStatusLine("x")):
+            with self.assertRaises(kt.TvError) as ctx:
+                self.tv.power_key("on")
+        self.assertIn("BadStatusLine", str(ctx.exception))
 
 class PowerModeTests(unittest.TestCase):
     def setUp(self):
@@ -1084,6 +1104,48 @@ class ManualOffAllTests(unittest.TestCase):
             self.assertEqual(text.count("still on"), 1)
             self.assertIn("girls-room: manual off sent", text)
 
+    def test_off_all_goes_on_past_an_unreachable_first_tv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tv_dir(tmp)
+            log = Path(tmp, "kids-tv.log")
+            tried = []
+
+            def off(self_tv, catt, log_fn):
+                tried.append(self_tv.name)
+                if self_tv.name == "boys-room":
+                    raise kt.TvUnreachable("boys-room: request failed: URLError(OSError): [Errno 64] Host is down")
+
+            with mock.patch.object(kt.Tv, "power_off_verified", off), \
+                    mock.patch.object(kt.Tv, "cast_uptime", return_value="5 s"), \
+                    mock.patch("sys.stderr"), mock.patch("builtins.print"):
+                rc = kt.main(["--config-dir", tmp, "--log", str(log), "--state", tmp + "/s.json",
+                              "off", "--tv", "all"])
+            self.assertEqual(rc, 1)
+            self.assertEqual(tried, ["boys-room", "girls-room"])
+            text = log.read_text()
+            self.assertEqual(text.count("Host is down"), 1)
+            self.assertIn("ERROR: boys-room: request failed", text)
+            self.assertIn("girls-room: manual off sent", text)
+
+    def test_on_all_skips_the_cast_of_a_tv_whose_on_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tv_dir(tmp)
+            sent = []
+
+            def key(self_tv, state):
+                if self_tv.name == "boys-room":
+                    raise kt.TvError("boys-room: TV answered BLOCKED")
+                sent.append((self_tv.name, "on"))
+
+            with mock.patch.object(kt.Tv, "power_key", key), \
+                    mock.patch.object(kt.Tv, "cast", lambda self_tv, catt: sent.append((self_tv.name, "cast"))), \
+                    mock.patch.object(kt.Tv, "cast_uptime", return_value="5 s"), \
+                    mock.patch("sys.stderr"), mock.patch("builtins.print"):
+                rc = kt.main(["--config-dir", tmp, "--log", tmp + "/l.log", "--state", tmp + "/s.json",
+                              "on", "--tv", "all"])
+            self.assertEqual(rc, 1)
+            self.assertEqual(sent, [("girls-room", "on"), ("girls-room", "cast")])
+
     def test_make_actions_uses_the_log_it_is_given(self):
         logs = []
         args = mock.Mock(config_dir="/nonexistent", catt="/fake/catt", log="/nonexistent/should-not-be-used.log")
@@ -1137,13 +1199,25 @@ class MdnsTests(unittest.TestCase):
         tv_dir(self.tmp.name)
         self.addCleanup(kt.TV_MDNS.clear)
 
+    GET = (b"Timestamp     A/R  Flags  IF  Hostname         Address    TTL\n"
+           b" 7:30:02.001  Add  40000002  7  Girls-tv.local.  10.1.1.9   120\n")
+
     def test_lookup_parses_dns_sd_after_its_timeout(self):
-        with mock.patch.object(kt.subprocess, "run",
-                               side_effect=subprocess.TimeoutExpired(["dns-sd"], 4, output=self.OUT)) as run, \
-                mock.patch.object(kt.socket, "gethostbyname", return_value="10.1.1.9") as resolve:
+        def fake(cmd, **kw):
+            self.assertEqual(kw["timeout"], kt.MDNS_SECONDS)
+            raise subprocess.TimeoutExpired(cmd, 4, output=self.OUT if cmd[1] == "-L" else self.GET)
+
+        with mock.patch.object(kt.subprocess, "run", side_effect=fake) as run, \
+                mock.patch.object(kt.socket, "gethostbyname", side_effect=AssertionError("unbounded lookup")):
             self.assertEqual(kt.mdns_lookup("Girls"), "10.1.1.9")
-        self.assertEqual(run.call_args[0][0], ["dns-sd", "-L", "Girls", "_viziocast._tcp", "local"])
-        resolve.assert_called_once_with("Girls-tv.local")
+        self.assertEqual([c[0][0] for c in run.call_args_list],
+                         [["dns-sd", "-L", "Girls", "_viziocast._tcp", "local"], ["dns-sd", "-G", "v4", "Girls-tv.local"]])
+
+    def test_host_lookup_that_finds_nothing_in_time(self):
+        with mock.patch.object(kt.subprocess, "run",
+                               side_effect=lambda cmd, **kw: (_ for _ in ()).throw(
+                                   subprocess.TimeoutExpired(cmd, 4, output=self.OUT if cmd[1] == "-L" else b""))):
+            self.assertIsNone(kt.mdns_lookup("Girls"))
 
     def test_lookup_finds_nothing(self):
         with mock.patch.object(kt.subprocess, "run", side_effect=subprocess.TimeoutExpired(["dns-sd"], 4, output=b"")):
@@ -1182,6 +1256,81 @@ class MdnsTests(unittest.TestCase):
     def test_bad_mdns_name_in_config_is_an_error(self):
         with self.assertRaises(kt.ScheduleError):
             kt.apply_local_config({"tvs": {"girls-room": {"env_file": "g.env", "prefix": "G_", "mdns_name": ""}}})
+
+
+class LockTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        tv_dir(self.tmp.name)
+
+    def hold(self, name):
+        """Hold a TV's lock as another kids-tv.py would (flock is per open file)."""
+        import fcntl
+        handle = open(Path(self.tmp.name, "kids-tv-%s.lock" % name), "a")
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.addCleanup(handle.close)
+        return handle
+
+    def test_lock_is_exclusive_and_released(self):
+        with kt.tv_lock(self.tmp.name, "boys-room") as first:
+            self.assertTrue(first)
+            with kt.tv_lock(self.tmp.name, "boys-room") as second:
+                self.assertFalse(second)
+            with kt.tv_lock(self.tmp.name, "girls-room") as other:
+                self.assertTrue(other)
+        with kt.tv_lock(self.tmp.name, "boys-room") as again:
+            self.assertTrue(again)
+
+    def test_tick_skips_a_locked_tv_and_does_it_next_minute(self):
+        state = Path(self.tmp.name, "state.json")
+        logs = []
+        rec = Recorder()
+        handle = self.hold("boys-room")
+        kt.tick(SCHEDULE, at(THU, 6, 0), state, rec.actions(), logs.append)
+        self.assertEqual(rec.calls, [("on", "girls-room"), ("cast", "girls-room")])
+        self.assertIn("boys-room: another kids-tv command is using this TV; on skipped this tick", logs)
+        handle.close()
+        kt.tick(SCHEDULE, at(THU, 6, 1), state, rec.actions(), logs.append)
+        self.assertEqual(rec.calls[2:], [("on", "boys-room"), ("cast", "boys-room")])
+
+    def test_manual_command_waits_then_gives_up_and_still_does_the_other_tv(self):
+        self.hold("boys-room")
+        clock = {"t": 0.0}
+
+        def sleep(seconds):
+            clock["t"] += seconds
+
+        log = Path(self.tmp.name, "l.log")
+        with mock.patch.object(kt.time, "monotonic", lambda: clock["t"]), \
+                mock.patch.object(kt.time, "sleep", sleep), \
+                mock.patch.object(kt.Tv, "power_off_verified", lambda self_tv, catt, log: None), \
+                mock.patch.object(kt.Tv, "cast_uptime", return_value="5 s"), \
+                mock.patch("sys.stderr"), mock.patch("builtins.print"):
+            rc = kt.main(["--config-dir", self.tmp.name, "--log", str(log), "--state",
+                          str(Path(self.tmp.name, "s.json")), "off", "--tv", "all"])
+        self.assertEqual(rc, 1)
+        self.assertGreaterEqual(clock["t"], kt.LOCK_WAIT_SECONDS)
+        self.assertLess(clock["t"], kt.LOCK_WAIT_SECONDS + 2)
+        text = log.read_text()
+        self.assertIn("ERROR: boys-room: another kids-tv command kept this TV busy for 120 s; manual off not sent", text)
+        self.assertIn("girls-room: manual off sent", text)
+
+    def test_manual_command_gets_the_lock_once_it_is_free(self):
+        handle = self.hold("girls-room")
+        clock = {"t": 0.0}
+
+        def sleep(seconds):
+            clock["t"] += seconds
+            if clock["t"] >= 5:
+                handle.close()
+
+        with mock.patch.object(kt.time, "monotonic", lambda: clock["t"]), mock.patch.object(kt.time, "sleep", sleep), \
+                mock.patch.object(kt.Tv, "power_mode", return_value="on"), mock.patch("builtins.print") as shown:
+            rc = kt.main(["--config-dir", self.tmp.name, "--log", self.tmp.name + "/l.log", "--state",
+                          self.tmp.name + "/s.json", "status", "--tv", "girls-room"])
+        self.assertEqual(rc, 0)
+        shown.assert_any_call("girls-room: on")
 
 
 class AlertTests(unittest.TestCase):
@@ -1420,6 +1569,10 @@ class SonosTests(unittest.TestCase):
     def alerts(self):
         return json.loads(self.alert.read_text())["alerts"] if self.alert.exists() else []
 
+    def owned(self):
+        path = Path(self.tmp.name, "kids-sonos-alarms.json")
+        return json.loads(path.read_text()) if path.exists() else {}
+
     def test_evening_sets_tomorrows_run_day_alarm_and_creates_the_missing_one(self):
         self.assertEqual(self.tick(dt.datetime(2026, 11, 1, 20, 29, tzinfo=LA)), 0)
         self.assertEqual(self.fake.calls, [])  # before 20:30 nothing
@@ -1444,9 +1597,75 @@ class SonosTests(unittest.TestCase):
         for i, name in enumerate(actions):
             if name in ("CreateAlarm", "UpdateAlarm"):
                 self.assertEqual(actions[i + 1], "ListAlarms")
-        self.assertTrue(any("boys-room: sonos alarm for 2026-11-02: created from the backup, re-read: on 06:00 ON_1" == m
-                            for m in self.logs))
-        self.assertTrue(any("girls-room: sonos alarm for 2026-11-02: updated, re-read: on 06:00 ON_1" == m for m in self.logs))
+        self.assertIn("boys-room: sonos alarm for 2026-11-02: created from the backup (ID 40), re-read: on 06:00 ON_1",
+                      self.logs)
+        self.assertIn("girls-room: sonos alarm for 2026-11-02: updated (ID 5), re-read: on 06:00 ON_1", self.logs)
+        owned = self.owned()
+        self.assertEqual((owned["boys-room"]["id"], owned["boys-room"]["from"]), ("40", "created"))
+        self.assertEqual((owned["girls-room"]["id"], owned["girls-room"]["from"]), ("5", "backup"))
+
+    def fresh_evening(self, when=dt.datetime(2026, 11, 1, 20, 30, tzinfo=LA)):
+        if self.state.exists():
+            self.state.unlink()
+        self.fake.calls.clear()
+        return self.tick(when)
+
+    def test_a_created_alarm_that_is_later_deleted_alerts_and_is_never_recreated(self):
+        self.fresh_evening()
+        self.fake.alarms = [a for a in self.fake.alarms if a["ID"] != "40"]
+        self.fresh_evening()
+        self.assertNotIn("CreateAlarm", [a for a, _ in self.fake.calls])
+        self.assertEqual(self.alarm(BOYS_UID), [])
+        boys = [a for a in self.alerts() if a["tv"] == "boys-room" and a["step"] == "sonos-sync"]
+        self.assertEqual(len(boys), 1)
+        self.assertIn("alarm 40 that this job owns is gone from the room; not creating another", boys[0]["error"])
+
+    def test_only_the_owned_alarm_id_is_touched(self):
+        # Another alarm in the girls' room with the same source, and one in the boys' room: never written.
+        twin = listed("9", GIRLS_UID, ALBUM, enabled="0")
+        stray = listed("12", BOYS_UID, QUEUE, enabled="0")
+        self.fake.alarms += [dict(twin), dict(stray)]
+        self.fresh_evening()
+        self.assertEqual([a for a in self.fake.alarms if a["ID"] == "9"], [twin])
+        self.assertEqual([a for a in self.fake.alarms if a["ID"] == "12"], [stray])
+        self.assertEqual(sorted(args["ID"] for a, args in self.fake.calls if a == "UpdateAlarm"), ["5"])
+
+    def test_the_backup_alarm_gone_after_it_was_adopted_alerts(self):
+        self.fresh_evening()
+        self.fake.alarms = [a for a in self.fake.alarms if a["ID"] != "5"]
+        self.fresh_evening()
+        self.assertEqual(self.alarm(GIRLS_UID), [])
+        self.assertIn("alarm 5 that this job owns is gone",
+                      [a for a in self.alerts() if a["tv"] == "girls-room"][0]["error"])
+
+    def test_configured_alarm_id_wins_and_is_never_replaced(self):
+        kt.sonos_config["rooms"]["girls-room"]["alarm_id"] = "9"
+        self.fake.alarms.append(listed("9", GIRLS_UID, ALBUM, enabled="0"))
+        self.fresh_evening()
+        self.assertEqual([args["ID"] for a, args in self.fake.calls if a == "UpdateAlarm"], ["9"])
+        self.assertEqual(self.alarm(GIRLS_UID)[0]["Enabled"], "0")  # alarm 5 left alone
+        self.fake.alarms = [a for a in self.fake.alarms if a["ID"] != "9"]
+        self.fresh_evening()
+        self.assertEqual([a for a, _ in self.fake.calls if a in ("UpdateAlarm", "CreateAlarm")],
+                         [])  # boys' alarm already right; girls' configured alarm gone: alert only
+        self.assertIn("alarm 9 that this job owns is gone",
+                      [a for a in self.alerts() if a["tv"] == "girls-room"][0]["error"])
+
+    def test_an_unconfirmed_create_is_never_repeated(self):
+        self.fake.next_id = 0
+        orig = self.fake.answer
+        self.fake.answer = lambda action, inner: orig(action, "<AssignedID></AssignedID>" if action == "CreateAlarm" else inner)
+        self.fresh_evening()
+        self.assertEqual(self.owned()["boys-room"].keys(), {"creating"})
+        self.fresh_evening()
+        self.assertEqual([a for a, _ in self.fake.calls].count("CreateAlarm"), 0)
+        self.assertTrue(any("never confirmed" in m for m in self.logs))
+
+    def test_non_run_day_with_no_owned_alarm_creates_nothing(self):
+        self.fake.alarms = [dict(self.other)]
+        self.fresh_evening(dt.datetime(2026, 11, 2, 20, 30, tzinfo=LA))  # Tuesday is no board day
+        self.assertEqual(self.fake.writes(), [])
+        self.assertEqual(self.owned(), {})
 
     def test_evening_sync_is_once_a_day_and_idempotent(self):
         self.tick(dt.datetime(2026, 11, 1, 20, 30, tzinfo=LA))
@@ -1492,17 +1711,32 @@ class SonosTests(unittest.TestCase):
             self.tick(dt.datetime(2026, 11, 1, 20, 30, tzinfo=LA))
         self.assertEqual(self.alarm(GIRLS_UID)[0]["Enabled"], "0")
 
-    def test_undecidable_tomorrow_leaves_the_alarm_alone_and_alerts(self):
+    def test_undecidable_tomorrow_is_retried_until_23_then_alerts_once(self):
         doc = Path(self.tmp.name, "rd.json")
         doc.write_text(json.dumps(run_days_doc("2026-10-01T20:15:00-07:00", every_day_runs())))
         with mock.patch.dict(os.environ, {"KIDS_TV_RUN_DAYS": str(doc)}):
-            failed = self.tick(dt.datetime(2026, 11, 1, 20, 30, tzinfo=LA))
-            self.tick(dt.datetime(2026, 11, 1, 20, 31, tzinfo=LA))
+            for hour, minute in ((20, 30), (20, 31), (21, 45), (22, 59)):
+                self.assertEqual(self.tick(dt.datetime(2026, 11, 1, hour, minute, tzinfo=LA)), 0)
+            self.assertEqual(self.alerts(), [])
+            self.assertEqual(len([m for m in self.logs if "cannot tell yet" in m]), 2)  # once per room
+            failed = self.tick(dt.datetime(2026, 11, 1, 23, 0, tzinfo=LA))
+            self.tick(dt.datetime(2026, 11, 1, 23, 1, tzinfo=LA))
         self.assertEqual(failed, 2)
         self.assertEqual(self.fake.calls, [])
         self.assertEqual(sorted((a["tv"], a["step"]) for a in self.alerts()),
                          [("boys-room", "sonos-sync"), ("girls-room", "sonos-sync")])
         self.assertIn("stale", self.alerts()[0]["error"])
+        self.assertIn("by 23:00", self.alerts()[0]["error"])
+
+    def test_undecidable_tomorrow_that_becomes_clear_before_23_is_synced(self):
+        doc = Path(self.tmp.name, "rd.json")
+        doc.write_text(json.dumps(run_days_doc("2026-10-01T20:15:00-07:00", every_day_runs())))
+        with mock.patch.dict(os.environ, {"KIDS_TV_RUN_DAYS": str(doc)}):
+            self.tick(dt.datetime(2026, 11, 1, 20, 30, tzinfo=LA))
+            doc.write_text(json.dumps(run_days_doc("2026-11-01T21:00:00-08:00", every_day_runs())))
+            self.tick(dt.datetime(2026, 11, 1, 21, 5, tzinfo=LA))
+        self.assertEqual(self.alerts(), [])
+        self.assertEqual(self.alarm(GIRLS_UID)[0]["Enabled"], "1")
 
     def test_reread_that_does_not_match_fails_retries_and_alerts_once(self):
         self.fake.ignore_writes = True
@@ -1513,28 +1747,75 @@ class SonosTests(unittest.TestCase):
         self.assertTrue(any("re-read does not match" in m for m in self.logs))
         self.assertEqual([a["tv"] for a in self.alerts() if a["step"] == "sonos-sync"], ["boys-room", "girls-room"])
 
-    def test_morning_check_plays_a_silent_room_and_alerts(self):
-        self.fake.transport["10.0.0.22"] = "STOPPED"
-        self.assertEqual(self.tick(dt.datetime(2026, 11, 2, 6, 1, tzinfo=LA)), 0)
-        self.assertEqual(self.fake.calls, [])  # not before alarm + 2 min
-        self.tick(dt.datetime(2026, 11, 2, 6, 2, tzinfo=LA))
-        plays = [a for a, _ in self.fake.calls if a == "Play"]
-        self.assertEqual(len(plays), 1)
+    def run_morning(self, readings, minutes=range(0, 6)):
+        """readings: room address -> list of states, one per read; the last repeats."""
+        seq = {ip: list(v) for ip, v in readings.items()}
+        orig = self.fake.urlopen
+
+        def urlopen(req, timeout=None):
+            host = req.host.split(":")[0]
+            if req.get_header("Soapaction").endswith('#GetTransportInfo"') and host in seq:
+                states = seq[host]
+                self.fake.transport[host] = states.pop(0) if len(states) > 1 else states[0]
+            return orig(req, timeout)
+
+        self.fake.urlopen = urlopen
+        for minute in minutes:
+            self.tick(dt.datetime(2026, 11, 2, 6, minute, tzinfo=LA))
+
+    def calls_to(self, action):
+        return [a for a, _ in self.fake.calls if a == action]
+
+    def test_morning_room_that_never_played_gets_one_play_and_an_alert(self):
+        self.run_morning({"10.0.0.22": ["STOPPED"], "10.0.0.21": ["PLAYING"]})
+        self.assertEqual(len(self.calls_to("Play")), 1)
         self.assertEqual([(a["tv"], a["step"]) for a in self.alerts()], [("girls-room", "sonos")])
-        self.assertIn("room was STOPPED", self.alerts()[0]["error"])
-        self.assertIn("now PLAYING", self.alerts()[0]["error"])
-        self.assertIn("boys-room: sonos playing after alarm", self.logs)
-        self.fake.calls.clear()
-        self.tick(dt.datetime(2026, 11, 2, 6, 3, tzinfo=LA))
-        self.assertEqual(self.fake.calls, [])  # once per room per day
+        self.assertIn("did not play in the 2 min after alarm", self.alerts()[0]["error"])
+        # girls: 06:00, 06:01, 06:02 reads, then one more after Play; boys: one read at 06:00
+        self.assertEqual(len(self.calls_to("GetTransportInfo")), 5)
+
+    def test_morning_room_that_played_then_stopped_is_left_alone(self):
+        self.run_morning({"10.0.0.22": ["PAUSED_PLAYBACK", "PLAYING", "STOPPED"], "10.0.0.21": ["PLAYING"]})
+        self.assertEqual(self.calls_to("Play"), [])
+        self.assertEqual(self.alerts(), [])
+        self.assertEqual(len(self.calls_to("GetTransportInfo")), 3)  # read until seen playing, then never again
+        state = json.loads(self.state.read_text())
+        self.assertEqual(set(state["check"]["girls-room"]), {"ok"})
+
+    def test_morning_room_still_playing_is_read_once(self):
+        self.run_morning({"10.0.0.22": ["PLAYING"], "10.0.0.21": ["PLAYING"]})
+        self.assertEqual(self.calls_to("Play"), [])
+        self.assertEqual(self.alerts(), [])
+        self.assertEqual(len(self.calls_to("GetTransportInfo")), 2)
+        self.assertIn("girls-room: sonos playing after alarm", self.logs)
+
+    def test_morning_failed_reads_count_as_not_playing(self):
+        self.run_morning({"10.0.0.22": ["STOPPED"]}, minutes=[1])
+        self.assertEqual(self.calls_to("Play"), [])  # still inside the window
+        self.run_morning({"10.0.0.22": ["STOPPED"]}, minutes=[2])
+        self.assertEqual(len(self.calls_to("Play")), 1)
 
     def test_morning_check_only_on_run_days(self):
         self.fake.transport["10.0.0.22"] = "STOPPED"
         self.tick(dt.datetime(2026, 10, 27, 6, 2, tzinfo=LA))  # Tuesday: no board, no check
         self.assertEqual(self.fake.calls, [])
-        self.tick(dt.datetime(2026, 10, 30, 6, 32, tzinfo=LA))  # Friday: alarm 06:30
+        self.tick(dt.datetime(2026, 10, 30, 6, 32, tzinfo=LA))  # Friday: alarm 06:30, first tick after the window
         self.assertEqual([a for a, _ in self.fake.calls], ["GetTransportInfo", "GetTransportInfo", "Play",
                                                            "GetTransportInfo"])
+
+    def test_http_client_errors_are_sonos_errors_and_never_break_the_tick(self):
+        import http.client
+        with mock.patch("urllib.request.urlopen", side_effect=http.client.IncompleteRead(b"")):
+            with self.assertRaises(kt.SonosError) as ctx:
+                kt.Speaker("girls-room", "10.0.0.22").list_alarms()
+        self.assertIn("IncompleteRead", str(ctx.exception))
+        reports = []
+        with mock.patch("urllib.request.urlopen", self.fake.urlopen), \
+                mock.patch.object(kt, "room_is_playing", side_effect=http.client.HTTPException("odd")):
+            failed = kt.sonos_tick(SCHEDULE, dt.datetime(2026, 11, 2, 6, 2, tzinfo=LA), self.state, self.alert,
+                                   self.logs.append, report=reports.append)
+        self.assertEqual(failed, 1)
+        self.assertEqual(reports, ["sonos: HTTPException: odd"])
 
     def test_unreachable_speaker_alerts_without_its_address(self):
         def down(req, timeout=None):
@@ -1546,6 +1827,7 @@ class SonosTests(unittest.TestCase):
         self.assertEqual(failed, 2)
         errors = [a["error"] for a in self.alerts()]
         self.assertIn("[Errno 64] Host is down", errors[0])
+        self.assertIn("did not play", errors[0])
         self.assertNotIn("10.0.0.2", " ".join(errors + self.logs))
 
     def test_upnp_fault_is_named(self):
@@ -1607,6 +1889,13 @@ class SonosTests(unittest.TestCase):
         sonos.assert_called_once()
         self.assertEqual(sonos.call_args[0][2], Path(tmp, "kids-sonos-state.json"))
         self.assertEqual(sonos.call_args[0][3], tmp + "/a.json")
+
+
+class TestIsolationTests(unittest.TestCase):
+    def test_default_paths_are_not_the_real_home(self):
+        args = kt.build_parser().parse_args(["status"])
+        for path in (args.state, args.log, args.config_dir):
+            self.assertTrue(str(path).startswith(_NO_SKIP_DIR.name), path)
 
 
 class PlistTests(unittest.TestCase):
