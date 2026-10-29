@@ -1017,6 +1017,7 @@ SONOS_PLAY_SETTLE_SECONDS = 3
 SONOS_WATCH_BEFORE = dt.timedelta(minutes=1)  # the morning watch starts this long before alarm
 SONOS_POLL_SECONDS = 5  # within a tick, a watched room is read this often
 SONOS_TICK_BUDGET = 50  # seconds after a tick read the clock that it may keep polling (launchd runs it every 60)
+SONOS_POLL_TIMEOUT = 3  # a watch read gives up this fast, so a round of reads fits the budget
 ALARM_CLOCK = ("/AlarmClock/Control", "urn:schemas-upnp-org:service:AlarmClock:1")
 AV_TRANSPORT = ("/MediaRenderer/AVTransport/Control", "urn:schemas-upnp-org:service:AVTransport:1")
 ALARM_FIELDS = ("StartLocalTime", "Duration", "Recurrence", "Enabled", "RoomUUID", "ProgramURI",
@@ -1064,7 +1065,7 @@ class Speaker:
         self.key = key
         self._ip = ip
 
-    def call(self, service, action: str, args=()) -> Dict[str, str]:
+    def call(self, service, action: str, args=(), timeout: float = SONOS_TIMEOUT) -> Dict[str, str]:
         path, urn = service
         inner = "".join("<%s>%s</%s>" % (k, escape(str(v)), k) for k, v in args)
         envelope = ('<?xml version="1.0" encoding="utf-8"?>'
@@ -1075,7 +1076,7 @@ class Speaker:
             "http://%s:%d%s" % (self._ip, SONOS_PORT, path), data=envelope.encode("utf-8"), method="POST",
             headers={"Content-Type": 'text/xml; charset="utf-8"', "SOAPACTION": '"%s#%s"' % (urn, action)})
         try:
-            with urllib.request.urlopen(req, timeout=SONOS_TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read()
         except urllib.error.HTTPError as exc:
             try:
@@ -1116,8 +1117,8 @@ class Speaker:
     def update_alarm(self, alarm: dict) -> None:
         self.call(ALARM_CLOCK, "UpdateAlarm", [("ID", alarm["ID"])] + [(f, alarm.get(f, "")) for f in ALARM_FIELDS])
 
-    def transport_state(self) -> str:
-        return self.call(AV_TRANSPORT, "GetTransportInfo", [("InstanceID", 0)]).get("CurrentTransportState", "")
+    def transport_state(self, timeout: float = SONOS_TIMEOUT) -> str:
+        return self.call(AV_TRANSPORT, "GetTransportInfo", [("InstanceID", 0)], timeout).get("CurrentTransportState", "")
 
     def play(self) -> None:
         self.call(AV_TRANSPORT, "Play", [("InstanceID", 0), ("Speed", 1)])
@@ -1252,10 +1253,10 @@ def load_sonos_state(path, day: dt.date):
             "sync": {k: {"done": "unknown"} for k in rooms}, "check": {k: "unknown" for k in rooms}}, True
 
 
-def room_is_playing(sp: Speaker, log: Callable) -> bool:
-    """One read of the room's transport state; a failed read counts as not playing (and is logged)."""
+def room_is_playing(sp: Speaker, log: Callable, timeout: float = SONOS_POLL_TIMEOUT) -> bool:
+    """One quick read of the room's transport state; a failed read counts as not playing (and is logged)."""
     try:
-        return sp.transport_state() == "PLAYING"
+        return sp.transport_state(timeout) == "PLAYING"
     except SonosError as exc:
         log("%s: sonos state not read: %s" % (sp.key, exc))
         return False
@@ -1294,8 +1295,11 @@ def watch_rooms(keys: List[str], speaker: Callable, state: dict, state_path, now
 
     Without poll_from, one read per room. With it (the monotonic time `now` was
     read), keep reading every SONOS_POLL_SECONDS while some room is unsettled,
-    until watch_to or SONOS_TICK_BUDGET after poll_from, whichever is first. The
-    read count is kept in the state, so the watch carries across ticks."""
+    until watch_to. Each read gives up after SONOS_POLL_TIMEOUT, and a round of
+    reads starts only if it can end (every pending room timing out) within
+    SONOS_TICK_BUDGET of poll_from, so a slow TV part or silent speakers never
+    push the watch past it. The read count is kept in the state, so the watch
+    carries across ticks."""
     pending = list(keys)
     sp = {key: speaker(key) for key in keys}
     logged = set()
@@ -1306,7 +1310,12 @@ def watch_rooms(keys: List[str], speaker: Callable, state: dict, state_path, now
             logged.add(key)
             log(message)
 
-    while True:
+    def round_fits(after: float = 0.0) -> bool:
+        return time.monotonic() + after - poll_from + len(pending) * SONOS_POLL_TIMEOUT <= SONOS_TICK_BUDGET
+
+    while pending:
+        if poll_from is not None and not round_fits():
+            break
         wall = now if poll_from is None else now + dt.timedelta(seconds=time.monotonic() - poll_from)
         for key in list(pending):
             if room_is_playing(sp[key], once):
@@ -1319,8 +1328,7 @@ def watch_rooms(keys: List[str], speaker: Callable, state: dict, state_path, now
                 entry["reads"] = entry.get("reads", 0) + 1
         if not pending or poll_from is None:
             break
-        if (time.monotonic() + SONOS_POLL_SECONDS > poll_from + SONOS_TICK_BUDGET
-                or wall + dt.timedelta(seconds=SONOS_POLL_SECONDS) >= watch_to):
+        if not round_fits(SONOS_POLL_SECONDS) or wall + dt.timedelta(seconds=SONOS_POLL_SECONDS) >= watch_to:
             break
         time.sleep(SONOS_POLL_SECONDS)
     if pending:
@@ -1583,28 +1591,34 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
         failed = []
         for name in names:  # a TV that fails never stops the next one
-            with tv_lock(Path(args.state).parent, name, LOCK_WAIT_SECONDS) as held:
-                if not held:
-                    failed.append(name)
-                    message = "%s: another kids-tv command kept this TV busy for %d s; manual %s not sent" % (
-                        name, LOCK_WAIT_SECONDS, args.cmd)
-                    log("ERROR: " + message)
-                    sys.stderr.write("ERROR: %s\n" % message)
-                    continue
-                for step in steps:
-                    try:
-                        actions[step](name)
-                    except TvError as exc:
+            try:
+                with tv_lock(Path(args.state).parent, name, LOCK_WAIT_SECONDS) as held:
+                    if not held:
                         failed.append(name)
-                        if not isinstance(exc, OffDidNotStick):  # power_off_verified already logged that one
-                            log("ERROR: %s" % exc)
-                        sys.stderr.write("ERROR: %s\n" % exc)
-                        break
-                    if step != "status":
-                        log("%s: manual %s sent" % (name, step))
-                        print("%s: %s sent" % (name, step))
+                        message = "%s: another kids-tv command kept this TV busy for %d s; manual %s not sent" % (
+                            name, LOCK_WAIT_SECONDS, args.cmd)
+                        log("ERROR: " + message)
+                        sys.stderr.write("ERROR: %s\n" % message)
+                        continue
+                    for step in steps:
+                        try:
+                            actions[step](name)
+                        except TvError as exc:
+                            failed.append(name)
+                            if not isinstance(exc, OffDidNotStick):  # power_off_verified already logged that one
+                                log("ERROR: %s" % exc)
+                            sys.stderr.write("ERROR: %s\n" % exc)
+                            break
+                        if step != "status":
+                            log("%s: manual %s sent" % (name, step))
+                            print("%s: %s sent" % (name, step))
+            except StateError as exc:  # this TV's lock file cannot be opened: skip it, go on to the next
+                failed.append(name)
+                message = "%s: %s; manual %s not sent" % (name, exc, args.cmd)
+                log("ERROR: " + message)
+                sys.stderr.write("ERROR: %s\n" % message)
         return 1 if failed else 0
-    except (ScheduleError, TvError, ValueError, StateError) as exc:  # StateError: a TV lock file cannot be opened
+    except (ScheduleError, TvError, ValueError, StateError) as exc:  # StateError: a last guard, no traceback
         if args.cmd == "tick":
             report_error_once(str(exc), error_day, error_marker_path(args), log)
         else:
