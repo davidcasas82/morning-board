@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
+import io
 import json
 import os
 import plistlib
+import re
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -39,17 +42,38 @@ FRI = dt.date(2026, 10, 30)
 
 
 _NO_SKIP_DIR = tempfile.TemporaryDirectory()
+# The module's clock: the evening a (made-up) run-days file was written.
+CLOCK = dt.datetime(2026, 10, 28, 21, 0, tzinfo=LA)
+_clock_patch = mock.patch.object(kt, "clock", lambda: CLOCK)
+
+
+def run_days_doc(generated_at, days):
+    """A run-days document. days: {"YYYY-MM-DD": run}; every other field is made up."""
+    return {"generated_at": generated_at, "horizon_end": "2026-11-11",
+            "days": {d: {"kids_home": bool(r), "no_school": not r, "run": r, "why": "made-up note"}
+                     for d, r in days.items()}}
+
+
+def every_day_runs(first=dt.date(2026, 10, 1), count=100):
+    return {(first + dt.timedelta(days=i)).isoformat(): True for i in range(count)}
 
 
 def setUpModule():
-    # Other tests must not read the repo's real skip file or the mini's real local config.
+    # Other tests must not read the repo's real skip file, the mini's real local config,
+    # or the mini's real run-days file. Run-days says run for every day, and the clock is fixed.
     os.environ["KIDS_TV_SKIP"] = str(Path(_NO_SKIP_DIR.name, "none.json"))
     os.environ["KIDS_TV_CONFIG"] = str(Path(_NO_SKIP_DIR.name, "no-config.json"))
+    fixture = Path(_NO_SKIP_DIR.name, "run-days.json")
+    fixture.write_text(json.dumps(run_days_doc(CLOCK.isoformat(), every_day_runs())))
+    os.environ["KIDS_TV_RUN_DAYS"] = str(fixture)
+    _clock_patch.start()
 
 
 def tearDownModule():
+    _clock_patch.stop()
     os.environ.pop("KIDS_TV_SKIP", None)
     os.environ.pop("KIDS_TV_CONFIG", None)
+    os.environ.pop("KIDS_TV_RUN_DAYS", None)
     _NO_SKIP_DIR.cleanup()
 
 
@@ -260,6 +284,231 @@ class LoadTests(unittest.TestCase):
             kt.plan_for(sched, THU + dt.timedelta(days=offset))
 
 
+class RunDaysTests(unittest.TestCase):
+    """The calendar run-days file: run must be a literal true, and anything doubtful means no run."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.path = self.dir / "run-days.json"
+
+    def write(self, doc):
+        self.path.write_text(doc if isinstance(doc, str) else json.dumps(doc))
+        return self.path
+
+    def fresh(self, days, generated_at=None):
+        return self.write(run_days_doc(generated_at or CLOCK.isoformat(), days))
+
+    def check(self, day=THU, **kw):
+        return kt.is_run_day(SCHEDULE, day, self.dir / "no-skip.json", self.path, kw.get("now", CLOCK))
+
+    def test_run_true_runs(self):
+        self.fresh({"2026-10-29": True})
+        self.assertTrue(self.check())
+
+    def test_run_false_does_not_run_and_is_not_an_error(self):
+        self.fresh({"2026-10-29": False})
+        self.assertFalse(self.check())
+
+    def test_no_school_with_run_false_does_not_run(self):
+        doc = run_days_doc(CLOCK.isoformat(), {"2026-10-29": False})
+        doc["days"]["2026-10-29"].update(kids_home=True, no_school=True, run=False)
+        self.write(doc)
+        self.assertFalse(self.check())
+
+    def test_run_true_needs_the_schedule_too(self):
+        self.fresh({"2026-10-27": True, "2026-10-29": True})
+        self.assertFalse(self.check(TUE))  # schedule has Tuesday off
+        sched = json.loads(json.dumps(SCHEDULE))
+        sched["days"]["thursday"]["enabled"] = False
+        self.assertFalse(kt.is_run_day(sched, THU, self.dir / "x.json", self.path, CLOCK))
+
+    def test_off_schedule_day_never_reads_the_run_days_file(self):
+        self.assertFalse(self.check(TUE))  # file does not exist, and no error
+
+    def test_date_absent_is_an_error(self):
+        self.fresh({"2026-10-30": True})
+        with self.assertRaises(kt.RunDaysError) as ctx:
+            self.check()
+        self.assertIn("2026-10-29", str(ctx.exception))
+
+    def test_missing_file_is_an_error(self):
+        with self.assertRaises(kt.RunDaysError):
+            self.check()
+
+    def test_unreadable_file_is_an_error(self):
+        self.path.mkdir()  # a directory where the file should be
+        with self.assertRaises(kt.RunDaysError):
+            self.check()
+
+    def test_malformed_files_are_errors(self):
+        good = run_days_doc(CLOCK.isoformat(), {"2026-10-29": True})
+        cases = ["{not json", "[]", "{}", '{"days": []}', '{"generated_at": "x"}']
+        for key in ('"true"', "1", "null", "[]"):
+            doc = json.loads(json.dumps(good))
+            cases.append(json.dumps(doc).replace('"run": true', '"run": ' + key))
+        doc = json.loads(json.dumps(good)); doc["days"]["2026-10-29"] = "yes"; cases.append(json.dumps(doc))
+        for bad_stamp in (None, 5, "yesterday", ""):
+            doc = json.loads(json.dumps(good)); doc["generated_at"] = bad_stamp; cases.append(json.dumps(doc))
+        for case in cases:
+            self.write(case)
+            with self.assertRaises(kt.RunDaysError, msg=case[:80]):
+                self.check()
+
+    def test_stale_generated_at_is_an_error_and_fresh_is_fine(self):
+        for days_old, ok in ((4, True), (5, True), (6, False)):
+            stamp = (CLOCK - dt.timedelta(days=days_old)).isoformat()
+            self.fresh({"2026-10-29": True}, stamp)
+            if ok:
+                self.assertTrue(self.check(), days_old)
+            else:
+                with self.assertRaises(kt.RunDaysError) as ctx:
+                    self.check()
+                self.assertIn("stale", str(ctx.exception))
+
+    def test_generated_at_in_the_future_is_an_error(self):
+        self.fresh({"2026-10-29": True}, (CLOCK + dt.timedelta(hours=23)).isoformat())
+        self.assertTrue(self.check())
+        self.fresh({"2026-10-29": True}, (CLOCK + dt.timedelta(days=2)).isoformat())
+        with self.assertRaises(kt.RunDaysError):
+            self.check()
+
+    def test_timestamp_spellings_are_accepted(self):
+        for stamp in ("2026-10-28T20:15:00-07:00", "2026-10-29T03:15:00Z", "2026-10-28T20:15:00.123456789-07:00",
+                      "2026-10-28T20:15:00.5+00:00", "2026-10-28T20:15:00"):
+            self.fresh({"2026-10-29": True}, stamp)
+            self.assertTrue(self.check(), stamp)
+
+    def test_skip_list_overrides_run_true(self):
+        self.fresh({"2026-10-30": True})
+        skip = self.dir / "skip.json"
+        skip.write_text('{"skipDates": ["2026-10-30"]}')
+        self.assertFalse(kt.is_run_day(SCHEDULE, FRI, skip, self.path, CLOCK))
+        # and a skipped day does not need a run-days entry at all
+        self.fresh({"2026-10-29": True})
+        self.assertFalse(kt.is_run_day(SCHEDULE, FRI, skip, self.path, CLOCK))
+
+    def test_read_fresh_each_call(self):
+        self.fresh({"2026-10-29": False})
+        self.assertFalse(self.check())
+        self.fresh({"2026-10-29": True})
+        self.assertTrue(self.check())
+
+    def test_path_comes_from_env_then_local_config_then_default(self):
+        saved = kt.run_days_path_from_config
+        self.addCleanup(lambda: setattr(kt, "run_days_path_from_config", saved))
+        with mock.patch.dict(os.environ, {"KIDS_TV_RUN_DAYS": ""}):
+            self.assertEqual(kt.default_run_days_path(), Path.home() / ".config" / "kids-tv" / "run-days.json")
+            cfg = self.dir / "config.json"
+            cfg.write_text(json.dumps({"run_days_path": str(self.dir / "from-config.json")}))
+            kt.apply_local_config(kt.load_local_config(cfg))
+            self.assertEqual(kt.default_run_days_path(), self.dir / "from-config.json")
+            with mock.patch.dict(os.environ, {"KIDS_TV_RUN_DAYS": str(self.path)}):
+                self.assertEqual(kt.default_run_days_path(), self.path)
+            for bad in (5, "", ["x"]):
+                with self.assertRaises(kt.ScheduleError):
+                    kt.apply_local_config({"run_days_path": bad})
+
+    def test_plan_for_and_tick_follow_the_file(self):
+        self.fresh({"2026-10-29": False, "2026-10-30": True})
+        with mock.patch.dict(os.environ, {"KIDS_TV_RUN_DAYS": str(self.path)}):
+            self.assertIsNone(kt.plan_for(SCHEDULE, THU, CLOCK))
+            self.assertIsNotNone(kt.plan_for(SCHEDULE, FRI, CLOCK))
+            rec = Recorder()
+            kt.tick(SCHEDULE, at(THU, 6, 1), self.dir / "s.json", rec.actions(), kt.Log(self.dir / "l.log"))
+            self.assertEqual(rec.calls, [])
+
+    def run_tick_main(self, now, log, state):
+        sched = self.dir / "schedule.json"
+        sched.write_text(json.dumps(SCHEDULE))
+        return kt.main(["--schedule", str(sched), "--run-days", str(self.path), "--log", str(log),
+                        "--state", str(state), "tick", "--now", now])
+
+    def test_error_is_logged_once_per_day_not_every_minute_and_goes_to_stderr(self):
+        log, state = self.dir / "l.log", self.dir / "s.json"
+        err = io.StringIO()
+        with mock.patch.dict(os.environ), mock.patch.object(sys, "stderr", err):
+            for minute in range(0, 30):
+                self.assertEqual(self.run_tick_main("2026-10-29T06:%02d:00" % minute, log, state), 1)
+            lines = log.read_text().splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertIn("ERROR:", lines[0])
+            self.assertIn("run-days file is missing", lines[0])
+            self.assertEqual(len(err.getvalue().splitlines()), 1)
+            # a new day logs again; a different problem the same day also logs
+            self.assertEqual(self.run_tick_main("2026-10-30T06:31:00", log, state), 1)
+            self.assertEqual(len(log.read_text().splitlines()), 2)
+            self.path.write_text("{oops")
+            self.assertEqual(self.run_tick_main("2026-10-30T06:32:00", log, state), 1)
+            self.assertEqual(len(log.read_text().splitlines()), 3)
+        self.assertFalse(state.exists())  # nothing was sent, so no state either
+
+    def test_nothing_is_sent_when_the_file_is_missing(self):
+        log, state = self.dir / "l.log", self.dir / "s.json"
+        with mock.patch.dict(os.environ), mock.patch.object(sys, "stderr", io.StringIO()), \
+                mock.patch.object(kt, "Tv", side_effect=AssertionError("must not touch a TV")):
+            for minute in (0, 5, 60, 70):
+                self.run_tick_main("2026-10-29T0%d:%02d:00" % (6 + minute // 60, minute % 60), log, state)
+
+    def test_error_text_never_carries_the_why_note(self):
+        doc = run_days_doc(CLOCK.isoformat(), {"2026-10-29": True})
+        doc["days"]["2026-10-29"]["why"] = "SECRET-NOTE"
+        doc["days"]["2026-10-29"]["run"] = "maybe"
+        self.write(doc)
+        log, state = self.dir / "l.log", self.dir / "s.json"
+        with mock.patch.dict(os.environ), mock.patch.object(sys, "stderr", io.StringIO()) as err:
+            self.run_tick_main("2026-10-29T06:00:00", log, state)
+        self.assertNotIn("SECRET-NOTE", log.read_text())
+        self.assertNotIn("SECRET-NOTE", err.getvalue())
+
+    def test_repo_has_no_calendar_ids_custody_words_or_school_names(self):
+        bad = re.compile("|".join(["group" + r"\.calendar", "dad'?s" + " house", "mom'?s" + " house", "kid" + " rotation"]), re.I)
+        for path in (Path(kt.__file__), Path(__file__), ROOT / "README.md", ROOT / "kids-tv-skip.json"):
+            self.assertIsNone(bad.search(path.read_text()), path.name)
+
+
+class GraceAndStateErrorTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+
+    def test_power_on_grace_edge_is_fifteen_minutes_or_more(self):
+        for minute, second, sent in ((14, 59, True), (15, 0, False)):
+            rec, logs = Recorder(), []
+            state = self.dir / ("s%d.json" % minute)
+            kt.tick(SCHEDULE, at(THU, 6, minute, second), state, rec.actions(), logs.append)
+            self.assertEqual(bool(rec.calls), sent, (minute, second))
+            if not sent:
+                self.assertTrue(all("15 minutes or more past alarm" in m for m in logs if "skipped" in m))
+
+    def test_unwritable_state_error_is_logged_once_a_day_not_every_minute(self):
+        blocker = self.dir / "blocker"
+        blocker.write_text("a file, so a state file under it can never be written")
+        state, log, sched = blocker / "s.json", self.dir / "l.log", self.dir / "schedule.json"
+        sched.write_text(json.dumps(SCHEDULE))
+        rec = Recorder()
+
+        def run(now):
+            with mock.patch.object(kt, "make_actions", return_value=rec.actions()), \
+                    mock.patch.object(sys, "stderr", io.StringIO()) as err:
+                code = kt.main(["--schedule", str(sched), "--log", str(log), "--state", str(state),
+                                "tick", "--now", now])
+            return code, err.getvalue()
+
+        for minute in range(0, 20):
+            code, err = run("2026-10-29T06:%02d:00" % minute)
+            self.assertEqual(code, 1)
+            self.assertEqual(err.count("ERROR:"), 1 if minute == 0 else 0)
+        self.assertEqual(rec.calls, [])  # nothing was sent while the state could not be written
+        lines = log.read_text().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("cannot write state file", lines[0])
+        run("2026-10-30T06:30:00")  # a new day logs again
+        self.assertEqual(len(log.read_text().splitlines()), 2)
+
+
 class TickTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -353,7 +602,7 @@ class TickTests(unittest.TestCase):
         failures = kt.tick(SCHEDULE, at(THU, 6, 0), bad_state, rec.actions(), self.logs.append)
         self.assertEqual(rec.calls, [])
         self.assertEqual(failures, 1)
-        self.assertEqual(len([m for m in self.logs if m.startswith("error:")]), 1)
+        self.assertEqual(len([m for m in self.logs if m.startswith("ERROR:")]), 1)
 
     def test_state_write_failing_after_a_send_does_not_repeat(self):
         rec = Recorder()
@@ -379,7 +628,7 @@ class TickTests(unittest.TestCase):
         for minute in (0, 1, 70):
             self.run_tick(at(THU, 6, 0) + dt.timedelta(minutes=minute), rec)
         self.assertEqual(rec.calls, [])
-        self.assertEqual(len([m for m in self.logs if m.startswith("error:")]), 1)
+        self.assertEqual(len([m for m in self.logs if m.startswith("ERROR:")]), 1)
         # the next day starts clean
         self.run_tick(at(FRI, 6, 30), rec)
         self.assertEqual(rec.calls[0], ("on", "boys-room"))
