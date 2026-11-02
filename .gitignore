@@ -8,3 +8,6 @@ dashboard (*).html
 quotes.json
 google-token.json
 oauth-client.json
+
+# Built helper app (scripts/build-kids-tv-helper.sh)
+build/

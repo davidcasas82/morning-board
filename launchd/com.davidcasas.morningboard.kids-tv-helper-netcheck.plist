@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  PROTOTYPE, NOT INSTALLED. `kids-tv.py netcheck` with a 180 s settle at each login,
+  run through MorningBoardTVHelper.app, so it tests the permission the helper
+  job would have. TCP connect and close only; no TV or speaker is asked to do
+  anything. The 180 s settle also keeps the process alive long enough for macOS
+  to show its Local Network alert the first time (TN3179, FB16131937).
+  See README, "Local Network helper app".
+  Replace __REPO__ and __HOME__ and put this in ~/Library/LaunchAgents/.
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv-helper-netcheck.plist
+  Stop it with:
+    launchctl bootout gui/$(id -u)/com.davidcasas.morningboard.kids-tv-helper-netcheck
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.davidcasas.morningboard.kids-tv-helper-netcheck</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/Applications/MorningBoardTVHelper.app/Contents/MacOS/kids-tv-helper</string>
+    <string>__REPO__/scripts/kids-tv.py</string>
+    <string>netcheck</string>
+    <string>--settle</string>
+    <string>180</string>
+  </array>
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>com.davidcasas.morningboard.kidstv-helper</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/kids-tv-helper-netcheck.out</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/kids-tv-helper-netcheck.err</string>
+</dict>
+</plist>

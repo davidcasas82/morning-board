@@ -79,6 +79,17 @@ The reader is an alert-check routine outside this repo: at 6:20, 7:30 and 8:45 P
 
 Each TV's address and token live in an env file in `~/.config/vizio/` (`<PREFIX>IP` and `<PREFIX>TOKEN`). The repo only knows the neutral keys `boys-room` and `girls-room`, whose defaults are `boys-room.env` with prefix `VIZIO_BOYS_ROOM_` and `girls-room.env` with prefix `VIZIO_GIRLS_ROOM_`. To map a key to a different file, put `{"tvs": {"boys-room": {"env_file": "x.env", "prefix": "VIZIO_X_"}}}` in the mini-local `~/.config/kids-tv/config.json`, which is not in git and holds no tokens. They are read inside the script and never logged. The log is `~/Library/Logs/kids-tv-morning-board.log`.
 
+### Local Network helper app (prototype, not installed)
+
+After a restart, macOS Local Network privacy can block the kids-tv job: launchd starts `/usr/bin/python3`, macOS charges its connections to `com.apple.python3`, and a launchd agent gets no Terminal exemption. `MorningBoardTVHelper.app` is a small app bundle that gives the job its own identity, `com.davidcasas.morningboard.kidstv-helper`, so the permission is granted to that app once and recorded under its name.
+
+- `helper/kids-tv-helper.c` is the app's only executable. It starts `/usr/bin/python3 <abs path>/kids-tv.py ARGS` as a child process (`posix_spawn`, not `exec`), waits for it, passes on SIGTERM, SIGINT and SIGHUP, and exits with the child's status (128+N for signal N). A child keeps its parent's responsible process, so Python, and anything Python starts, counts as the app. It refuses any script not named `kids-tv.py` or not given by absolute path (exit 64).
+- `helper/Info.plist` sets `LSUIElement`, `NSLocalNetworkUsageDescription`, and `NSBonjourServices` with `_viziocast._tcp`, the only service the script resolves (`dns-sd -L`). The script connects to configured addresses and never browses for `_googlecast._tcp`, so that is not listed.
+- `scripts/build-kids-tv-helper.sh [OUT_DIR]` builds `MorningBoardTVHelper.app` into `build/` (ignored by git) with clang, ad-hoc signs it (`codesign --sign - --identifier com.davidcasas.morningboard.kidstv-helper --options runtime`), verifies it, and prints its cdhash. An ad-hoc signature's designated requirement is that cdhash. The build is reproducible: the same source and toolchain give the same cdhash from any checkout path, so a rebuild from the same commit keeps the grant. A change to `kids-tv-helper.c` or `Info.plist` (or a new clang) gives a new cdhash and needs a new grant. `kids-tv.py` itself is not part of the signature; changing it changes nothing here.
+- `launchd/com.davidcasas.morningboard.kids-tv-helper.plist` is the tick job run through the app (it replaces `kids-tv.plist`; never load both). `launchd/com.davidcasas.morningboard.kids-tv-helper-netcheck.plist` is the login netcheck run through the app. Both point at `__HOME__/Applications/MorningBoardTVHelper.app/Contents/MacOS/kids-tv-helper` and set `AssociatedBundleIdentifiers` to the app's identifier.
+
+Nothing installs these yet. `scripts/test_kids_tv_helper.py` checks the plist keys and templates and, on a Mac with clang, builds the app and checks its signature, the cdhash across two builds, and the launcher.
+
 ### Calendar run days
 
 Which days the TVs come on is decided by three things together: `schedule.json` has the weekday on with an alarm and leaveBy, the run-days file says `run` is `true` for that date, and the date is not in `kids-tv-skip.json` (the skip list wins). The repo holds no calendar names or ids.
