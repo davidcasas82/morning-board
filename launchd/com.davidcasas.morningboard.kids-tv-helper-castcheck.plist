@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Test agent, not part of the live job. A one-off, hand-run check that casting
+  works from launchd through MorningBoardTVHelper.app: `kids-tv.py castcheck`
+  casts the board to each TV, reads that the cast app is running, and stops it.
+  It powers no TV on or off. It runs once when loaded (RunAtLoad), so load it
+  only in a test window agreed beforehand and remove it right after; left in
+  place it would run again at the next login. It logs and alerts to its own
+  files, not the live job's. See README, "Local Network helper app".
+  Replace __REPO__ and __HOME__ and put this in ~/Library/LaunchAgents/, then:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv-helper-castcheck.plist
+  Remove it afterwards:
+    launchctl bootout gui/$(id -u)/com.davidcasas.morningboard.kids-tv-helper-castcheck
+    rm ~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv-helper-castcheck.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.davidcasas.morningboard.kids-tv-helper-castcheck</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/Applications/MorningBoardTVHelper.app/Contents/MacOS/kids-tv-helper</string>
+    <string>__REPO__/scripts/kids-tv.py</string>
+    <string>--log</string>
+    <string>__HOME__/Library/Logs/kids-tv-helper-castcheck.log</string>
+    <string>castcheck</string>
+    <string>--tv</string>
+    <string>all</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>KIDS_TV_ALERT</key>
+    <string>__HOME__/Library/Logs/kids-tv-helper-castcheck-alert.json</string>
+  </dict>
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>com.davidcasas.morningboard.kidstv-helper</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/kids-tv-helper-castcheck.out</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/kids-tv-helper-castcheck.err</string>
+</dict>
+</plist>

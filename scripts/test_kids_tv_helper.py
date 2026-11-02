@@ -21,6 +21,7 @@ APP_EXE = "__HOME__/Applications/MorningBoardTVHelper.app/Contents/MacOS/kids-tv
 TEMPLATES = {
     "tick": ROOT / "launchd" / "com.davidcasas.morningboard.kids-tv-helper.plist",
     "netcheck": ROOT / "launchd" / "com.davidcasas.morningboard.kids-tv-helper-netcheck.plist",
+    "castcheck": ROOT / "launchd" / "com.davidcasas.morningboard.kids-tv-helper-castcheck.plist",
 }
 
 spec = importlib.util.spec_from_file_location("kids_tv_for_helper", ROOT / "scripts" / "kids-tv.py")
@@ -56,7 +57,7 @@ class InfoPlistTests(unittest.TestCase):
 
 
 class TemplateTests(unittest.TestCase):
-    def test_both_run_the_app_executable_on_kids_tv_py(self):
+    def test_all_run_the_app_executable_on_kids_tv_py(self):
         for name, path in TEMPLATES.items():
             with self.subTest(name):
                 data = plistlib.loads(path.read_bytes())
@@ -78,6 +79,16 @@ class TemplateTests(unittest.TestCase):
         data = plistlib.loads(TEMPLATES["netcheck"].read_bytes())
         self.assertEqual(data["ProgramArguments"][2:],
                          ["--log", "__HOME__/Library/Logs/kids-tv-helper-netcheck.log", "netcheck", "--settle", "180"])
+        self.assertNotIn("StartInterval", data)
+        self.assertNotIn("KeepAlive", data)
+
+    def test_castcheck_template_runs_the_castcheck_once_away_from_the_live_files(self):
+        plain = plistlib.loads((ROOT / "launchd" / "com.davidcasas.morningboard.kids-tv-castcheck.plist").read_bytes())
+        data = plistlib.loads(TEMPLATES["castcheck"].read_bytes())
+        self.assertEqual(data["ProgramArguments"][2:],
+                         ["--log", "__HOME__/Library/Logs/kids-tv-helper-castcheck.log"] + plain["ProgramArguments"][2:])
+        self.assertEqual(data["EnvironmentVariables"],
+                         {"KIDS_TV_ALERT": "__HOME__/Library/Logs/kids-tv-helper-castcheck-alert.json"})
         self.assertNotIn("StartInterval", data)
         self.assertNotIn("KeepAlive", data)
 
