@@ -1,13 +1,25 @@
 #!/bin/bash
 # Build and ad-hoc sign MorningBoardTVHelper.app, the bundle that owns the kids-tv
 # job's Local Network permission. It builds; it does not install or start anything.
-#   scripts/build-kids-tv-helper.sh [OUT_DIR]     (default: <repo>/build)
-# The build is reproducible: the same source and toolchain give the same cdhash,
-# which the ad-hoc signature's designated requirement is pinned to.
+#   scripts/build-kids-tv-helper.sh SCRIPT [OUT_DIR]     (default OUT_DIR: <repo>/build)
+# SCRIPT is the absolute path of the kids-tv.py the installed app will run, for
+# example "$HOME/code/morning-board/scripts/kids-tv.py". It is compiled in: the
+# app refuses to run any other script.
+# The build is reproducible: the same source, SCRIPT and toolchain give the same
+# cdhash, which the ad-hoc signature's designated requirement is pinned to.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="${1:-$REPO/build}"
+SCRIPT="${1:-}"
+OUT="${2:-$REPO/build}"
+case "$SCRIPT" in
+  /*/kids-tv.py) ;;
+  *) echo "build-kids-tv-helper: usage: $0 /absolute/path/to/kids-tv.py [OUT_DIR]" >&2; exit 64 ;;
+esac
+case "$SCRIPT" in
+  *'"'*|*'\'*|*$'\n'*) echo "build-kids-tv-helper: the script path may not contain quotes, backslashes or newlines" >&2; exit 64 ;;
+esac
+[ -f "$SCRIPT" ] || { echo "build-kids-tv-helper: $SCRIPT is not a file" >&2; exit 66; }
 NAME="MorningBoardTVHelper"
 EXE="kids-tv-helper"
 BUNDLE_ID="com.davidcasas.morningboard.kidstv-helper"
@@ -27,6 +39,7 @@ printf 'APPL????' > "$APP/Contents/PkgInfo"
 # The Info.plist is also embedded (__TEXT,__info_plist), as TN3179 suggests for an
 # executable that may be seen outside its bundle.
 clang -Os -Wall -Wextra -Werror -arch arm64 -mmacosx-version-min=15.0 \
+  -DKIDS_TV_SCRIPT="\"$SCRIPT\"" \
   -sectcreate __TEXT __info_plist "$REPO/helper/Info.plist" \
   -o "$APP/Contents/MacOS/$EXE" "$REPO/helper/kids-tv-helper.c"
 
@@ -38,4 +51,5 @@ codesign --verify --strict --verbose=1 "$APP"
 cdhash="$(codesign -dvvv "$APP" 2>&1 | sed -n 's/^CDHash=//p')"
 echo "built $APP"
 echo "identifier $BUNDLE_ID"
+echo "script $SCRIPT"
 echo "cdhash $cdhash"

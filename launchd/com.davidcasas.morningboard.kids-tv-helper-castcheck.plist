@@ -4,12 +4,13 @@
   Test agent, not part of the live job. A one-off, hand-run check that casting
   works from launchd through MorningBoardTVHelper.app: `kids-tv.py castcheck`
   casts the board to each TV, reads that the cast app is running, and stops it.
-  It powers no TV on or off. It runs once when loaded (RunAtLoad), so load it
-  only in a test window agreed beforehand and remove it right after; left in
-  place it would run again at the next login. It logs and alerts to its own
-  files, not the live job's. See README, "Local Network helper app".
+  It powers no TV on or off. It has no RunAtLoad and no schedule: loading it
+  runs nothing, and it runs only when kickstarted. Load it, kickstart it and
+  remove it only inside a test window agreed beforehand. It logs and alerts to
+  its own files, not the live job's. See README, "Local Network helper app".
   Replace __REPO__ and __HOME__ and put this in ~/Library/LaunchAgents/, then:
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv-helper-castcheck.plist
+    launchctl kickstart gui/$(id -u)/com.davidcasas.morningboard.kids-tv-helper-castcheck
   Remove it afterwards:
     launchctl bootout gui/$(id -u)/com.davidcasas.morningboard.kids-tv-helper-castcheck
     rm ~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv-helper-castcheck.plist
@@ -37,8 +38,6 @@
   <array>
     <string>com.davidcasas.morningboard.kidstv-helper</string>
   </array>
-  <key>RunAtLoad</key>
-  <true/>
   <key>StandardOutPath</key>
   <string>__HOME__/Library/Logs/kids-tv-helper-castcheck.out</string>
   <key>StandardErrorPath</key>
