@@ -19,7 +19,7 @@ BUILD = ROOT / "scripts" / "build-kids-tv-helper.sh"
 BUNDLE_ID = "com.davidcasas.morningboard.kidstv-helper"
 APP_EXE = "__HOME__/Applications/MorningBoardTVHelper.app/Contents/MacOS/kids-tv-helper"
 TEMPLATES = {
-    "tick": ROOT / "launchd" / "com.davidcasas.morningboard.kids-tv-helper.plist",
+    "tick": ROOT / "launchd" / "com.davidcasas.morningboard.kids-tv.plist",
     "netcheck": ROOT / "launchd" / "com.davidcasas.morningboard.kids-tv-helper-netcheck.plist",
     "castcheck": ROOT / "launchd" / "com.davidcasas.morningboard.kids-tv-helper-castcheck.plist",
 }
@@ -63,17 +63,22 @@ class TemplateTests(unittest.TestCase):
                 data = plistlib.loads(path.read_bytes())
                 self.assertEqual(data["ProgramArguments"][:2], [APP_EXE, "__REPO__/scripts/kids-tv.py"])
                 self.assertTrue(APP_EXE.endswith("/Contents/MacOS/" + info()["CFBundleExecutable"]))
-                self.assertEqual(data["AssociatedBundleIdentifiers"], [BUNDLE_ID])
+                if name != "tick":  # the live job keeps exactly the keys it had; see the test below
+                    self.assertEqual(data["AssociatedBundleIdentifiers"], [BUNDLE_ID])
                 self.assertTrue(data["RunAtLoad"])
                 self.assertTrue(data["StandardOutPath"].startswith("__HOME__/Library/Logs/"))
                 self.assertTrue(data["StandardErrorPath"].startswith("__HOME__/Library/Logs/"))
 
-    def test_tick_template_matches_the_live_job_schedule(self):
-        live = plistlib.loads((ROOT / "launchd" / "com.davidcasas.morningboard.kids-tv.plist").read_bytes())
+    def test_live_job_runs_through_the_helper_and_keeps_every_other_key(self):
         data = plistlib.loads(TEMPLATES["tick"].read_bytes())
-        self.assertEqual(data["ProgramArguments"][1:], live["ProgramArguments"][1:])
-        self.assertEqual(data["StartInterval"], live["StartInterval"])
-        self.assertNotEqual(data["Label"], live["Label"])
+        self.assertEqual(data, {
+            "Label": "com.davidcasas.morningboard.kids-tv",
+            "ProgramArguments": [APP_EXE, "__REPO__/scripts/kids-tv.py", "tick"],
+            "RunAtLoad": True,
+            "StartInterval": 60,
+            "StandardOutPath": "__HOME__/Library/Logs/kids-tv-morning-board.out",
+            "StandardErrorPath": "__HOME__/Library/Logs/kids-tv-morning-board.err",
+        })
 
     def test_netcheck_template_runs_once_with_a_settle(self):
         data = plistlib.loads(TEMPLATES["netcheck"].read_bytes())

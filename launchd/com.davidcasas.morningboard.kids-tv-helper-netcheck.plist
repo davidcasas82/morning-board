@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Test agent, not part of the live job. `kids-tv.py netcheck` with a 180 s
-  settle at each login, run through MorningBoardTVHelper.app, so it tests the
-  permission the helper job would have. TCP connect and close only; no TV or
+  Login netcheck, installed with the kids-tv job. `kids-tv.py netcheck` with a
+  180 s settle at each login, run through MorningBoardTVHelper.app like the
+  job, so it tests the permission the job has. TCP connect and close only; no TV or
   speaker is asked to do anything. It logs to its own file, not the live job's
   log. The 180 s settle also keeps the process alive long enough for macOS to
   show its Local Network alert the first time (TN3179, FB16131937).

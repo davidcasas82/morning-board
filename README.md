@@ -63,7 +63,7 @@ A receiver status the script cannot read (empty, or an app with no id) is "unkno
 
 Only one command acts on a TV at a time: each TV has a lock file, `kids-tv-<key>.lock`, beside the state file (`fcntl.flock`). `tick` skips a TV another command holds, with a log line, and tries again next minute. A manual command waits up to 120 seconds, then logs an `ERROR:` and exits 1. With `--tv all`, a TV that fails (unreachable, busy, or an off that does not stick) is logged and the next TV is still done; the command exits 1 if any TV failed.
 
-LaunchAgent `launchd/com.davidcasas.morningboard.kids-tv.plist` runs `tick` once a minute and at login. `tick` reads the schedule and a small state file; it sends to a TV only when a step is due: one power-on and cast per TV after alarm, one power-off per TV after on-the-road. The state file (`~/Library/Application Support/morning-board/kids-tv-state.json`) keeps a reboot or a second tick from repeating a step. It reads a TV's power state only for 90 seconds after a power-off, so a kid who switches away is left alone. A power-on 15 minutes or more after alarm is skipped for the day and logged, and a power-off 20 minutes or more after on-the-road is skipped. Each step is written to the state file before it is sent; if the state file cannot be written, or is damaged, nothing is sent that day and an `ERROR:` is logged once for the day (not every minute; the marker is `kids-tv-error-day.json` beside the log). A failed step is retried on later ticks, up to four times, then logged and dropped for the day.
+LaunchAgent `launchd/com.davidcasas.morningboard.kids-tv.plist` runs `tick` once a minute and at login, through `MorningBoardTVHelper.app` (see "Local Network helper app" below). `tick` reads the schedule and a small state file; it sends to a TV only when a step is due: one power-on and cast per TV after alarm, one power-off per TV after on-the-road. The state file (`~/Library/Application Support/morning-board/kids-tv-state.json`) keeps a reboot or a second tick from repeating a step. It reads a TV's power state only for 90 seconds after a power-off, so a kid who switches away is left alone. A power-on 15 minutes or more after alarm is skipped for the day and logged, and a power-off 20 minutes or more after on-the-road is skipped. Each step is written to the state file before it is sent; if the state file cannot be written, or is damaged, nothing is sent that day and an `ERROR:` is logged once for the day (not every minute; the marker is `kids-tv-error-day.json` beside the log). A failed step is retried on later ticks, up to four times, then logged and dropped for the day.
 
 Alerts go to `~/Library/Application Support/morning-board/kids-tv-alert.json` (override with `KIDS_TV_ALERT` or `--alert`), outside the repo, with an `ALERT:` line in the log. One is written at once for the first failed power-on of the day (after the 4-minute restart window for a TV that does not answer), an off that does not stick, and the Sonos failures below; at most one per TV, step and date. A cast that fails writes one alert on its first try (`cast`) and one more when its tries run out (`cast-final`). The file is `{"alerts": [{"date", "tv", "step", "error", "at"}, ...]}`, newest last, the newest 60 kept, replaced atomically. `step` is `on`, `off`, `cast`, `cast-final`, `netcheck`, `sonos` or `sonos-sync`; `tv` is a TV key, a Sonos room key, or `all`.
 
@@ -75,20 +75,42 @@ The reader is an alert-check routine outside this repo: at 6:20 AM, 7:30 AM and 
 
 `netcheck` opens one TCP connection, then closes it, to each port the job uses: each TV's Cast port 8009, its Cast info port 8008 and SmartCast 7345, and each Sonos room's 1400. It sends nothing on them. A port that does not answer is retried for `--settle` seconds (default 0). It logs one line with each result: ok, refused, timed out, no route (`EHOSTUNREACH`), network unreachable or host down. If every connection fails at once with no route to host, it writes one alert, tv `all`, step `netcheck`, starting `Local Network permission blocked`: macOS fails a process that lacks the Local Network permission that way at once. Otherwise each TV or room with a failing port gets its own `netcheck` alert. It exits 1 if anything failed.
 
-`launchd/com.davidcasas.morningboard.kids-tv-netcheck.plist` runs `netcheck --settle 180` at each login, so after the weekly restart. Its program is `/usr/bin/python3` itself, as for the kids-tv job, so it tests the same permission. `launchd/com.davidcasas.morningboard.kids-tv-castcheck.plist` is a hand-run test that casts each TV from launchd, reads the app and stops it; it has no schedule.
+`launchd/com.davidcasas.morningboard.kids-tv-helper-netcheck.plist` runs `netcheck --settle 180` at each login, so after the weekly restart, through the helper app like the kids-tv job, so it tests the same permission. It logs to `~/Library/Logs/kids-tv-helper-netcheck.log`, not the job's log. `launchd/com.davidcasas.morningboard.kids-tv-netcheck.plist` is the same check run by plain `/usr/bin/python3`; install it instead only after rolling back to plain python3. `launchd/com.davidcasas.morningboard.kids-tv-castcheck.plist` and `launchd/com.davidcasas.morningboard.kids-tv-helper-castcheck.plist` are one-off tests that cast each TV from launchd, read the app and stop it. Install one only for a test window agreed beforehand, and remove it right after.
 
 Each TV's address and token live in an env file in `~/.config/vizio/` (`<PREFIX>IP` and `<PREFIX>TOKEN`). The repo only knows the neutral keys `boys-room` and `girls-room`, whose defaults are `boys-room.env` with prefix `VIZIO_BOYS_ROOM_` and `girls-room.env` with prefix `VIZIO_GIRLS_ROOM_`. To map a key to a different file, put `{"tvs": {"boys-room": {"env_file": "x.env", "prefix": "VIZIO_X_"}}}` in the mini-local `~/.config/kids-tv/config.json`, which is not in git and holds no tokens. They are read inside the script and never logged. The log is `~/Library/Logs/kids-tv-morning-board.log`.
 
-### Local Network helper app (not live yet)
+### Local Network helper app
 
-After a restart, macOS Local Network privacy can block the kids-tv job: launchd starts `/usr/bin/python3`, macOS charges its connections to `com.apple.python3`, and a launchd agent gets no Terminal exemption. `MorningBoardTVHelper.app` is a small app bundle that gives the job its own identity, `com.davidcasas.morningboard.kidstv-helper`, so the permission is granted to that app once and recorded under its name.
+The kids-tv job runs through `MorningBoardTVHelper.app`, a small app bundle with its own identity, `com.davidcasas.morningboard.kidstv-helper`. macOS Local Network privacy then judges the app, not Python.
+
+Why: run directly, launchd starts `/usr/bin/python3`, and macOS charges its connections to `com.apple.python3`. A launchd agent gets no Terminal exemption. That grant goes stale. `/usr/bin/python3` is a stub that runs the Python inside Xcode or the Command Line Tools, and an Xcode or CLT update replaces that binary. At each boot macOS rebuilds the list of binaries the grant covers. If the grant does not point at the real binary, the list can miss it, and after a reboot every connection fails at once with no route to host. When an app starts a helper tool, macOS counts the app as the responsible code, and it identifies the app by its own bundle id and executable ([TN3179](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)). A Python update does not touch that.
 
 - `helper/kids-tv-helper.c` is the app's only executable. It starts `/usr/bin/python3 <abs path>/kids-tv.py ARGS` as a child process (`posix_spawn`, not `exec`), waits for it, passes on SIGTERM, SIGINT and SIGHUP, and exits with the child's status (128+N for signal N). A child keeps its parent's responsible process, so Python, and anything Python starts, counts as the app. It refuses any script not named `kids-tv.py` or not given by absolute path (exit 64).
-- `helper/Info.plist` sets `LSUIElement`, `NSLocalNetworkUsageDescription`, and `NSBonjourServices` with `_viziocast._tcp`, the only service the script resolves (`dns-sd -L`). The script connects to configured addresses and never browses for `_googlecast._tcp`, so that is not listed.
-- `scripts/build-kids-tv-helper.sh [OUT_DIR]` builds `MorningBoardTVHelper.app` into `build/` (ignored by git) with clang, ad-hoc signs it (`codesign --sign - --identifier com.davidcasas.morningboard.kidstv-helper --options runtime`), verifies it, and prints its cdhash. An ad-hoc signature's designated requirement is that cdhash. The build is reproducible: the same source and toolchain give the same cdhash from any checkout path, so a rebuild from the same commit keeps the grant. A change to `kids-tv-helper.c` or `Info.plist` (or a new clang) gives a new cdhash and needs a new grant. `kids-tv.py` itself is not part of the signature; changing it changes nothing here.
-- `launchd/com.davidcasas.morningboard.kids-tv-helper.plist` is the tick job run through the app (it replaces `kids-tv.plist`; never load both). `launchd/com.davidcasas.morningboard.kids-tv-helper-netcheck.plist` is the login netcheck run through the app; it writes to its own log, `__HOME__/Library/Logs/kids-tv-helper-netcheck.log`, not the live job's. `launchd/com.davidcasas.morningboard.kids-tv-helper-castcheck.plist` is the one-off castcheck run through the app: it runs once when loaded, logs and alerts to its own files under `__HOME__/Library/Logs/`, and is removed right after a test window. All three point at `__HOME__/Applications/MorningBoardTVHelper.app/Contents/MacOS/kids-tv-helper` and set `AssociatedBundleIdentifiers` to the app's identifier.
+- `helper/Info.plist` sets `LSUIElement`, `NSLocalNetworkUsageDescription` (the text in the Allow prompt), and `NSBonjourServices` with `_viziocast._tcp`, the only service the script resolves (`dns-sd -L`). The script connects to configured addresses and never browses for `_googlecast._tcp`, so that is not listed.
+- `scripts/build-kids-tv-helper.sh [OUT_DIR]` builds `MorningBoardTVHelper.app` into `build/` (ignored by git) with clang, ad-hoc signs it (`codesign --sign - --identifier com.davidcasas.morningboard.kidstv-helper --options runtime`), verifies it, and prints its cdhash. The build is reproducible: the same source and toolchain give the same binary from any checkout path. `kids-tv.py` is not part of the app; changing it changes nothing here.
+- Templates: `launchd/com.davidcasas.morningboard.kids-tv.plist` (the job), `launchd/com.davidcasas.morningboard.kids-tv-helper-netcheck.plist` (the login netcheck) and `launchd/com.davidcasas.morningboard.kids-tv-helper-castcheck.plist` (test windows only) all start `__HOME__/Applications/MorningBoardTVHelper.app/Contents/MacOS/kids-tv-helper` with the script as its first argument.
 
-None is the live job yet: switching `kids-tv.plist` to the helper needs David's go. `scripts/test_kids_tv_helper.py` checks the plist keys and templates and, on a Mac with clang, builds the app and checks its signature, the cdhash across two builds, and the launcher.
+Install, as the mini account, before the job (no sudo):
+
+```
+scripts/build-kids-tv-helper.sh
+mkdir -p ~/Applications
+ditto build/MorningBoardTVHelper.app ~/Applications/MorningBoardTVHelper.app
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f ~/Applications/MorningBoardTVHelper.app
+```
+
+The first time the app connects, macOS shows "Allow “MorningBoardTVHelper” to find devices on local networks?" on the mini's screen. Someone has to click Allow there; until then every connection fails. The prompt stays up until it is answered. The login netcheck is the easy way to raise it.
+
+Caveats:
+
+- Right after boot, the first lookup of the app's identity can come back empty; a retry about 1.5 s later finds it. A connection in those first seconds can fail. `tick` retries on the next minute, and the netcheck's 180 s settle covers it.
+- The netcheck retries a failing port for 180 s (`--settle 180`) before it alerts. A block shows up as an alert about 3 minutes after login, not at once.
+- A rebuild that changes the binary (new `kids-tv-helper.c` or `Info.plist`, or a new clang) gives the app a new UUID and cdhash. macOS may show the Allow prompt once more, and David has to click Allow at the mini. Until then the job may be blocked.
+- `AssociatedBundleIdentifiers`, which the netcheck and castcheck templates set, is ignored for an executable without a Team ID (ad-hoc signed). It only changes how Login Items lists the agent; Local Network does not use it. The job's template does not set it.
+
+Roll back to plain python3: in `~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv.plist`, set the first `ProgramArguments` entry back to `/usr/bin/python3`, then `launchctl bootout gui/$(id -u)/com.davidcasas.morningboard.kids-tv` and `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv.plist`. Swap the helper netcheck for `kids-tv-netcheck.plist` the same way. Python then needs its own Local Network grant (Settings > Privacy & Security > Local Network, or the prompt) and can go stale again as above. The app can stay installed; nothing else uses it.
+
+`scripts/test_kids_tv_helper.py` checks the templates (the job runs through the app and keeps every other key) and, on a Mac with clang, builds the app and checks its signature, the cdhash across two builds, and the launcher.
 
 ### Calendar run days
 
@@ -123,10 +145,14 @@ With a `"sonos"` block in the local config, `tick` also keeps the two kids' room
 
 The state for this is `kids-sonos-state.json` beside the TV state file.
 
-Install as the mini account. This is the step that makes it live:
+Install as the mini account, after the helper app (see "Local Network helper app"). This is the step that makes it live; it installs the job and its login netcheck:
 
 ```
-sed -e "s|__REPO__|$HOME/code/morning-board|g" -e "s|__HOME__|$HOME|g" \
-  launchd/com.davidcasas.morningboard.kids-tv.plist > ~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv.plist
+for job in kids-tv kids-tv-helper-netcheck; do
+  sed -e "s|__REPO__|$HOME/code/morning-board|g" -e "s|__HOME__|$HOME|g" \
+    launchd/com.davidcasas.morningboard.$job.plist > ~/Library/LaunchAgents/com.davidcasas.morningboard.$job.plist
+  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davidcasas.morningboard.$job.plist
+done
 ```
+
+The castcheck templates are not installed here; they are for test windows only.

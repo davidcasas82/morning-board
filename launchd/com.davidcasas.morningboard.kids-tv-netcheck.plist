@@ -6,8 +6,10 @@
   It opens one TCP connection to each port the job uses and closes it; no TV
   or speaker is asked to do anything. A block or an unreachable device is
   written to the alert file. See README, "Network check".
-  It runs /usr/bin/python3 itself, as the kids-tv job does, so it gets the
-  same Local Network permission. Do not call it from a shell script job.
+  It runs /usr/bin/python3 itself, so it tests python3's own Local Network
+  permission. Install it only after rolling the kids-tv job back to plain
+  python3; the live job uses kids-tv-helper-netcheck.plist. Do not call it from
+  a shell script job.
   User LaunchAgent for ~/Library/LaunchAgents/. Replace __REPO__ and __HOME__.
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv-netcheck.plist
   Stop it with:
