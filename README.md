@@ -69,6 +69,8 @@ Alerts go to `~/Library/Application Support/morning-board/kids-tv-alert.json` (o
 
 `alerts` lists the alerts not yet acknowledged, each with an id `date/tv/step` (`--json` for JSON, `--all` to include acknowledged ones). `alerts --ack ID ...` or `alerts --ack-all` marks them read in `kids-tv-alert-ack.json` beside the alert file. The job never reads that file and `alerts` never writes the alert file, so a reader and the job do not write the same file.
 
+The reader is an alert-check routine outside this repo: at 6:20, 7:30 and 8:45 PM it runs `kids-tv.py alerts --json`, passes anything new on, then acknowledges it with `--ack`. Nothing in this repo sends a message.
+
 ### Network check
 
 `netcheck` opens one TCP connection, then closes it, to each port the job uses: each TV's Cast port 8009, its Cast info port 8008 and SmartCast 7345, and each Sonos room's 1400. It sends nothing on them. A port that does not answer is retried for `--settle` seconds (default 0). It logs one line with each result: ok, refused, timed out, no route (`EHOSTUNREACH`), network unreachable or host down. If every connection fails at once with no route to host, it writes one alert, tv `all`, step `netcheck`, starting `Local Network permission blocked`: macOS fails a process that lacks the Local Network permission that way at once. Otherwise each TV or room with a failing port gets its own `netcheck` alert. It exits 1 if anything failed.

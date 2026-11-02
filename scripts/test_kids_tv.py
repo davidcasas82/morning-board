@@ -2085,6 +2085,7 @@ import shutil
 import ssl
 import struct
 import threading
+import time
 
 
 class FakeReceiver:
@@ -2552,6 +2553,153 @@ class NetcheckPlistTests(unittest.TestCase):
         with mock.patch.dict(os.environ):
             os.environ.pop("KIDS_TV_CATT", None)
             self.assertIsNone(kt.build_parser().parse_args(["status"]).catt)
+
+
+class RawReceiver:
+    """A TLS server on 127.0.0.1 that sends fixed bytes after the handshake, then closes or goes quiet.
+    With tls=False it accepts and never speaks, so the client's TLS handshake waits."""
+
+    def __init__(self, certfile, keyfile, data=b"", close=True, tls=True):
+        self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.ctx.load_cert_chain(certfile, keyfile)
+        self.data, self.close_after, self.tls = data, close, tls
+        self.done = threading.Event()
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(4)
+        self.port = self.sock.getsockname()[1]
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def close(self):
+        self.done.set()
+        self.sock.close()
+
+    def serve(self):
+        try:
+            raw, _ = self.sock.accept()
+        except OSError:
+            return
+        try:
+            conn = self.ctx.wrap_socket(raw, server_side=True) if self.tls else raw
+            conn.sendall(self.data)
+            if not self.close_after:
+                self.done.wait(10)
+            conn.close()
+        except OSError:
+            raw.close()
+
+
+@unittest.skipUnless(OPENSSL, "openssl makes the fake receiver's certificate")
+class CastFrameAndDeadlineTests(unittest.TestCase):
+    """Damaged frames are clean errors, and one deadline covers connect, handshake and reads."""
+
+    setUpClass = classmethod(CastProtocolTests.setUpClass.__func__)
+    tearDownClass = classmethod(CastProtocolTests.tearDownClass.__func__)
+
+    def receiver(self, data=b"", close=True, tls=True):
+        rx = RawReceiver(self.cert, self.key, data, close, tls)
+        self.addCleanup(rx.close)
+        return rx
+
+    def recv_error(self, rx, timeout=2.0):
+        start = time.monotonic()
+        with self.assertRaises((kt.CastError, OSError)) as ctx:
+            with kt.CastChannel("127.0.0.1", rx.port, timeout=timeout) as ch:
+                ch.recv()
+        return ctx.exception, time.monotonic() - start
+
+    def test_partial_frame_then_close_is_a_connection_error(self):
+        exc, _ = self.recv_error(self.receiver(struct.pack(">I", 100) + b"x" * 10))
+        self.assertIsInstance(exc, ConnectionError)
+
+    def test_partial_frame_then_silence_times_out_at_the_deadline(self):
+        exc, took = self.recv_error(self.receiver(struct.pack(">I", 100) + b"x" * 10, close=False), timeout=1.0)
+        self.assertIsInstance(exc, socket.timeout)
+        self.assertLess(took, 1.5)
+
+    def test_oversized_frame_is_refused_before_reading_it(self):
+        exc, _ = self.recv_error(self.receiver(struct.pack(">I", kt.CAST_MAX_MESSAGE + 1), close=False))
+        self.assertIsInstance(exc, kt.CastError)
+        self.assertIn("too large", str(exc))
+
+    def test_garbage_frame_is_a_cast_error(self):
+        exc, _ = self.recv_error(self.receiver(struct.pack(">I", 5) + b"\xff" * 5))
+        self.assertIsInstance(exc, kt.CastError)
+
+    def test_slow_connect_and_a_silent_handshake_share_one_deadline(self):
+        rx = self.receiver(close=False, tls=False)
+        real = socket.create_connection
+
+        def slow_connect(*args, **kw):
+            time.sleep(0.6)
+            return real(*args, **kw)
+
+        start = time.monotonic()
+        with mock.patch.object(kt.socket, "create_connection", slow_connect):
+            with self.assertRaises(socket.timeout):
+                kt.CastChannel("127.0.0.1", rx.port, timeout=1.0)
+        self.assertLess(time.monotonic() - start, 1.4)
+
+
+class ManualStopTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        tv_dir(self.tmp.name)
+
+    def run_stop(self, idle):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(kt.Tv, "stop_cast", lambda tv, catt, log: idle), \
+                mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            rc = kt.main(["--config-dir", self.tmp.name, "--log", self.tmp.name + "/l.log",
+                          "--state", self.tmp.name + "/s.json", "stop", "--tv", "boys-room"])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_a_stop_that_never_reads_idle_fails_and_exits_1(self):
+        rc, out, err = self.run_stop(False)
+        self.assertEqual(rc, 1)
+        self.assertNotIn("stop sent", out)
+        self.assertIn("boys-room: stop failed", err)
+
+    def test_a_stop_that_reads_idle_prints_stop_sent(self):
+        rc, out, _ = self.run_stop(True)
+        self.assertEqual(rc, 0)
+        self.assertIn("boys-room: stop sent", out)
+
+
+class CastcheckPlistTests(unittest.TestCase):
+    def test_castcheck_plist_runs_castcheck_on_demand_with_apples_python(self):
+        path = ROOT / "launchd" / "com.davidcasas.morningboard.kids-tv-castcheck.plist"
+        data = plistlib.loads(path.read_bytes())
+        self.assertEqual(data["Label"], "com.davidcasas.morningboard.kids-tv-castcheck")
+        self.assertEqual(data["ProgramArguments"], ["/usr/bin/python3", "__REPO__/scripts/kids-tv.py",
+                                                    "castcheck", "--tv", "all"])
+        self.assertTrue(data["StandardOutPath"].startswith("__HOME__/"))
+        self.assertTrue(data["StandardErrorPath"].startswith("__HOME__/"))
+        for key in ("RunAtLoad", "StartInterval", "KeepAlive", "StartCalendarInterval"):
+            self.assertNotIn(key, data)
+
+
+class NetcheckTargetsTests(unittest.TestCase):
+    def test_a_tv_with_a_bad_config_is_reported_not_probed(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        tv_dir(tmp.name, keys=("boys-room",))
+        with mock.patch.object(kt, "sonos_config", None):
+            targets = kt.netcheck_targets(tmp.name)
+        self.assertEqual([t[:2] for t in targets], [("boys-room", "cast"), ("boys-room", "cast-info"),
+                                                    ("boys-room", "smartcast"), ("girls-room", "config")])
+        self.assertIsNone(targets[-1][2])
+        probed, logs = [], []
+        alert = Path(tmp.name, "alert.json")
+        failing = kt.netcheck(targets, alert, logs.append, at(THU, 6, 0),
+                              check=lambda host, port: probed.append(host) or "ok")
+        self.assertEqual(failing, 1)
+        self.assertEqual(probed, [IP] * 3)
+        alerts = json.loads(alert.read_text())["alerts"]
+        self.assertEqual([(a["tv"], a["step"]) for a in alerts], [("girls-room", "netcheck")])
+        self.assertIn("config not checked", alerts[0]["error"])
+        self.assertNotIn("t0ken", alert.read_text() + "".join(logs))
 
 
 if __name__ == "__main__":

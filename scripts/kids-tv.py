@@ -57,6 +57,7 @@ import ipaddress
 import json
 import os
 import re
+import select
 import socket
 import ssl
 import struct
@@ -524,7 +525,7 @@ def run_for_output(cmd: List[str]) -> Optional[str]:
 # page is loaded), and send it the URL with force on.
 
 CAST_PORT = 8009
-CAST_TIMEOUT = 10  # seconds for one Cast operation, connect included
+CAST_TIMEOUT = 10  # seconds for one Cast operation in total: connect, TLS handshake, reads and writes
 CAST_MAX_MESSAGE = 1 << 20
 SENDER_ID = "sender-0"
 RECEIVER_ID = "receiver-0"
@@ -595,7 +596,7 @@ def decode_cast_message(body: bytes) -> Dict[str, str]:
 
 
 class CastChannel:
-    """One TLS connection to a Cast receiver. All reads and writes share one deadline.
+    """One TLS connection to a Cast receiver. Connect, TLS handshake, reads and writes share one deadline.
 
     Opening it connects to the platform receiver. A PING from the receiver is
     answered with a PONG while reading. Socket errors are raised as they are
@@ -611,11 +612,34 @@ class CastChannel:
         ctx.verify_mode = ssl.CERT_NONE  # a Cast receiver's certificate is self-signed
         raw = socket.create_connection((host, port or CAST_PORT), timeout=timeout)
         try:
-            self._sock = ctx.wrap_socket(raw)
+            self._sock = ctx.wrap_socket(raw, do_handshake_on_connect=False)
         except BaseException:
             raw.close()
             raise
-        self.connect(RECEIVER_ID)
+        try:
+            self._handshake()
+            self.connect(RECEIVER_ID)
+        except BaseException:
+            self._sock.close()
+            raise
+
+    def _handshake(self) -> None:
+        """A blocking handshake times out per socket wait, not in total, so step it by hand against the deadline."""
+        self._sock.setblocking(False)
+        try:
+            while True:
+                try:
+                    self._sock.do_handshake()
+                    return
+                except ssl.SSLWantReadError:
+                    wait = ([self._sock], [])
+                except ssl.SSLWantWriteError:
+                    wait = ([], [self._sock])
+                left = self._deadline - time.monotonic()
+                if left <= 0 or not any(select.select(wait[0], wait[1], [], left)[:2]):
+                    raise socket.timeout("TLS handshake timed out")
+        finally:
+            self._sock.setblocking(True)
 
     def __enter__(self):
         return self
@@ -1986,13 +2010,17 @@ def make_actions(args, log: Callable) -> Dict[str, Callable]:
         log("%s: cast uptime at off: %s" % (name, tv(name).cast_uptime()))
         tv(name).power_off_verified(args.catt, log)
 
+    def stop(name: str) -> None:
+        if not tv(name).stop_cast(args.catt, log):
+            raise TvError("%s: stop failed: the receiver did not read idle within %d s" % (name, STOP_WAIT_SECONDS))
+
     return {
         "on": on,
         "off": off,
         "cast": lambda n: tv(n).cast(args.catt),
         "status": lambda n: print("%s: %s" % (n, tv(n).power_mode())),
         "info": lambda n: print("%s: cast app %s" % (n, tv(n).cast_app(args.catt) or "none (idle)")),
-        "stop": lambda n: tv(n).stop_cast(args.catt, log),
+        "stop": stop,
         "castcheck": lambda n: tv(n).castcheck(args.catt, log),
     }
 
