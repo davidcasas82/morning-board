@@ -2557,12 +2557,19 @@ class NetcheckPlistTests(unittest.TestCase):
 
 class RawReceiver:
     """A TLS server on 127.0.0.1 that sends fixed bytes after the handshake, then closes or goes quiet.
-    With tls=False it accepts and never speaks, so the client's TLS handshake waits."""
+    With tls=False it accepts and never speaks, so the client's TLS handshake waits.
 
-    def __init__(self, certfile, keyfile, data=b"", close=True, tls=True):
+    It first reads the client's CONNECT, the one message CastChannel sends on
+    opening. A socket closed with bytes still unread sends a TCP reset, not a
+    FIN, and a reset makes the client's recv fail with ECONNRESET even when the
+    bytes sent before it are already waiting, so the error would depend on
+    timing. With reset=True it closes with SO_LINGER 0, which always sends a
+    reset, as a receiver dropping the connection does."""
+
+    def __init__(self, certfile, keyfile, data=b"", close=True, tls=True, reset=False):
         self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.ctx.load_cert_chain(certfile, keyfile)
-        self.data, self.close_after, self.tls = data, close, tls
+        self.data, self.close_after, self.tls, self.reset = data, close, tls, reset
         self.done = threading.Event()
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
@@ -2581,12 +2588,26 @@ class RawReceiver:
             return
         try:
             conn = self.ctx.wrap_socket(raw, server_side=True) if self.tls else raw
+            if self.tls:
+                self.read_exactly(conn, struct.unpack(">I", self.read_exactly(conn, 4))[0])
             conn.sendall(self.data)
             if not self.close_after:
                 self.done.wait(10)
+            if self.reset:
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
             conn.close()
         except OSError:
             raw.close()
+
+    @staticmethod
+    def read_exactly(conn, size):
+        data = b""
+        while len(data) < size:
+            chunk = conn.recv(size - len(data))
+            if not chunk:
+                raise ConnectionError("client closed")
+            data += chunk
+        return data
 
 
 @unittest.skipUnless(OPENSSL, "openssl makes the fake receiver's certificate")
@@ -2596,8 +2617,8 @@ class CastFrameAndDeadlineTests(unittest.TestCase):
     setUpClass = classmethod(CastProtocolTests.setUpClass.__func__)
     tearDownClass = classmethod(CastProtocolTests.tearDownClass.__func__)
 
-    def receiver(self, data=b"", close=True, tls=True):
-        rx = RawReceiver(self.cert, self.key, data, close, tls)
+    def receiver(self, data=b"", close=True, tls=True, reset=False):
+        rx = RawReceiver(self.cert, self.key, data, close, tls, reset)
         self.addCleanup(rx.close)
         return rx
 
@@ -2611,6 +2632,26 @@ class CastFrameAndDeadlineTests(unittest.TestCase):
     def test_partial_frame_then_close_is_a_connection_error(self):
         exc, _ = self.recv_error(self.receiver(struct.pack(">I", 100) + b"x" * 10))
         self.assertIsInstance(exc, ConnectionError)
+
+    def test_partial_frame_then_reset_is_a_connection_reset(self):
+        exc, _ = self.recv_error(self.receiver(struct.pack(">I", 100) + b"x" * 10, reset=True))
+        self.assertIsInstance(exc, ConnectionResetError)
+
+    def test_a_reset_mid_frame_fails_the_cast_read_like_a_bad_answer(self):
+        """The channel raises the reset as it is (OSError); the Tv methods the tick and the
+        manual commands call turn it into TvError, the same as a CastError, so it is logged,
+        retried and alerted like any failed cast."""
+        partial = struct.pack(">I", 100) + b"x" * 10
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        Path(tmp.name, "boys-room.env").write_text("VIZIO_BOYS_ROOM_IP=127.0.0.1\nVIZIO_BOYS_ROOM_TOKEN=fake-token-value\n")
+        tv = kt.Tv("boys-room", tmp.name)
+        with mock.patch.object(kt, "CAST_PORT", self.receiver(partial, reset=True).port):
+            with self.assertRaises(kt.TvError) as ctx:
+                tv.cast_app()
+        self.assertIn("cast status failed: ConnectionResetError", str(ctx.exception))
+        with mock.patch.object(kt, "CAST_PORT", self.receiver(partial, reset=True).port):
+            self.assertIn("ConnectionResetError", tv._cast_once(None))
 
     def test_partial_frame_then_silence_times_out_at_the_deadline(self):
         exc, took = self.recv_error(self.receiver(struct.pack(">I", 100) + b"x" * 10, close=False), timeout=1.0)
