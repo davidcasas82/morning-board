@@ -69,7 +69,7 @@ Alerts go to `~/Library/Application Support/morning-board/kids-tv-alert.json` (o
 
 `alerts` lists the alerts not yet acknowledged, each with an id `date/tv/step` (`--json` for JSON, `--all` to include acknowledged ones). `alerts --ack ID ...` or `alerts --ack-all` marks them read in `kids-tv-alert-ack.json` beside the alert file. The job never reads that file and `alerts` never writes the alert file, so a reader and the job do not write the same file.
 
-The reader is an alert-check routine outside this repo: at 6:20, 7:30 and 8:45 PM it runs `kids-tv.py alerts --json`, passes anything new on, then acknowledges it with `--ack`. Nothing in this repo sends a message.
+The reader is an alert-check routine outside this repo: at 6:20 AM, 7:30 AM and 8:45 PM it runs `kids-tv.py alerts --json`, passes anything new on, then acknowledges it with `--ack`. Nothing in this repo sends a message.
 
 ### Network check
 
