@@ -2079,5 +2079,672 @@ class PlistTests(unittest.TestCase):
         self.assertTrue(data["RunAtLoad"])
 
 
+# ------------------------------------------------------------- Cast protocol
+
+import shutil
+import ssl
+import struct
+import threading
+import time
+
+
+class FakeReceiver:
+    """A Cast receiver on 127.0.0.1 over TLS (a self-signed certificate made for the test).
+
+    It answers GET_STATUS, LAUNCH and STOP on the receiver namespace as a
+    Chromecast does, records every message it gets as (namespace, dest, data),
+    and before answering a LAUNCH sends a PING and a stale unsolicited status,
+    so the client must answer heartbeats and wait for its own reply.
+    """
+
+    BACKDROP = {"appId": kt.BACKDROP_APP_ID, "isIdleScreen": True, "sessionId": "idle", "transportId": "idle"}
+
+    def __init__(self, certfile, keyfile):
+        self.apps = [dict(self.BACKDROP)]
+        self.status_override = None  # a value here is sent as the status instead
+        self.launch_error = None
+        self.messages = []
+        self.launches = 0
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(certfile, keyfile)
+        self.ctx = ctx
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.port = self.sock.getsockname()[1]
+        self.thread = threading.Thread(target=self.serve, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.sock.close()
+
+    def serve(self):
+        while True:
+            try:
+                raw, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self.handle, args=(raw,), daemon=True).start()
+
+    def frame(self, conn, ns, data, source="receiver-0"):
+        conn.sendall(kt.encode_cast_message(source, "sender-0", ns, json.dumps(data)))
+
+    def status(self, request_id):
+        status = self.status_override if self.status_override is not None else {
+            "applications": [dict(a) for a in self.apps], "volume": {"level": 0.5, "muted": False}}
+        return {"type": "RECEIVER_STATUS", "requestId": request_id, "status": status}
+
+    def handle(self, raw):
+        try:
+            conn = self.ctx.wrap_socket(raw, server_side=True)
+        except (OSError, ssl.SSLError):
+            raw.close()
+            return
+        buf = b""
+        with conn:
+            while True:
+                try:
+                    chunk = conn.recv(65536)
+                except OSError:
+                    return
+                if not chunk:
+                    return
+                buf += chunk
+                while len(buf) >= 4 and len(buf) >= 4 + struct.unpack(">I", buf[:4])[0]:
+                    size = struct.unpack(">I", buf[:4])[0]
+                    msg = kt.decode_cast_message(buf[4:4 + size])
+                    buf = buf[4 + size:]
+                    self.answer(conn, msg)
+
+    def answer(self, conn, msg):
+        data = json.loads(msg["payload"])
+        self.messages.append((msg["namespace"], msg["dest"], data))
+        if msg["namespace"] != kt.NS_RECEIVER:
+            return
+        rid = data.get("requestId")
+        if data["type"] == "GET_STATUS":
+            self.frame(conn, kt.NS_RECEIVER, self.status(rid))
+        elif data["type"] == "LAUNCH":
+            self.frame(conn, kt.NS_HEARTBEAT, {"type": "PING"})
+            self.frame(conn, kt.NS_RECEIVER, self.status(0))  # stale: from before the launch
+            if self.launch_error:
+                self.frame(conn, kt.NS_RECEIVER, {"type": "LAUNCH_ERROR", "requestId": rid,
+                                                  "reason": self.launch_error})
+                return
+            self.launches += 1
+            n = self.launches
+            self.apps = [{"appId": data["appId"], "isIdleScreen": False, "sessionId": "session-%d" % n,
+                          "transportId": "transport-%d" % n, "displayName": "DashCast"}]
+            self.frame(conn, kt.NS_RECEIVER, self.status(rid))
+        elif data["type"] == "STOP":
+            self.apps = [dict(self.BACKDROP)]
+            self.frame(conn, kt.NS_RECEIVER, self.status(rid))
+
+    def sent(self, ns=None):
+        return [(n, d, m) for n, d, m in self.messages if ns is None or n == ns]
+
+
+OPENSSL = shutil.which("openssl")
+
+
+@unittest.skipUnless(OPENSSL, "openssl makes the fake receiver's certificate")
+class CastProtocolTests(unittest.TestCase):
+    """The stdlib Cast client against a fake receiver over real TLS on 127.0.0.1. No TV, no LAN."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.certdir = tempfile.TemporaryDirectory()
+        cls.cert = os.path.join(cls.certdir.name, "cert.pem")
+        cls.key = os.path.join(cls.certdir.name, "key.pem")
+        subprocess.run([OPENSSL, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", cls.key,
+                        "-out", cls.cert, "-days", "1", "-subj", "/CN=fake-receiver"],
+                       check=True, capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.certdir.cleanup()
+
+    def setUp(self):
+        self.rx = FakeReceiver(self.cert, self.key)
+        self.addCleanup(self.rx.close)
+        port = mock.patch.object(kt, "CAST_PORT", self.rx.port)
+        port.start()
+        self.addCleanup(port.stop)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        Path(self.tmp.name, "boys-room.env").write_text("VIZIO_BOYS_ROOM_IP=127.0.0.1\nVIZIO_BOYS_ROOM_TOKEN=fake-token-value\n")
+        self.tv = kt.Tv("boys-room", self.tmp.name)
+        self.logs = []
+
+    def test_cast_site_launches_dashcast_then_sends_the_url_to_its_transport(self):
+        app = kt.cast_site("127.0.0.1", kt.BOARD_URL)
+        self.assertEqual(app["appId"], kt.DASHCAST_APP_ID)
+        sent = self.rx.sent()
+        kinds = [(ns, dest, data.get("type")) for ns, dest, data in sent if ns != kt.NS_HEARTBEAT]
+        self.assertEqual(kinds, [
+            (kt.NS_CONNECTION, "receiver-0", "CONNECT"),
+            (kt.NS_RECEIVER, "receiver-0", "LAUNCH"),
+            (kt.NS_CONNECTION, "transport-1", "CONNECT"),
+            (kt.NS_DASHCAST, "transport-1", None),
+            (kt.NS_RECEIVER, "receiver-0", "GET_STATUS"),
+        ])
+        launch = self.rx.sent(kt.NS_RECEIVER)[0][2]
+        self.assertEqual(launch["appId"], "84912283")
+        page = self.rx.sent(kt.NS_DASHCAST)[0][2]
+        self.assertEqual({k: page[k] for k in ("url", "force", "reload", "reload_time", "sessionId")},
+                         {"url": kt.BOARD_URL, "force": True, "reload": False, "reload_time": 0,
+                          "sessionId": "session-1"})
+        self.assertIn((kt.NS_HEARTBEAT, "receiver-0", {"type": "PONG"}), sent)
+
+    def test_cast_site_relaunches_a_running_dashcast_and_uses_the_new_transport(self):
+        self.rx.apps = [{"appId": kt.DASHCAST_APP_ID, "isIdleScreen": False, "sessionId": "old",
+                         "transportId": "old-transport"}]
+        kt.cast_site("127.0.0.1", kt.BOARD_URL)
+        self.assertEqual(self.rx.launches, 1)
+        self.assertEqual([d for ns, d, _ in self.rx.sent(kt.NS_DASHCAST)], ["transport-1"])
+
+    def test_launch_error_fails_the_cast_with_its_reason(self):
+        self.rx.launch_error = "NOT_FOUND"
+        with mock.patch.object(kt, "CAST_SETTLE_SECONDS", 0), mock.patch.object(kt, "CAST_RETRY_SECONDS", 0), \
+                mock.patch.object(kt, "CAST_TRIES", 2):
+            with self.assertRaises(kt.TvError) as ctx:
+                self.tv.cast()
+        self.assertIn("LAUNCH_ERROR NOT_FOUND", str(ctx.exception))
+        self.assertEqual(len([m for ns, _, m in self.rx.sent(kt.NS_RECEIVER) if m["type"] == "LAUNCH"]), 2)
+        self.assertEqual(self.rx.sent(kt.NS_DASHCAST), [])
+
+    def test_tv_cast_info_and_stop_end_to_end(self):
+        with mock.patch.object(kt, "CAST_SETTLE_SECONDS", 0):
+            self.tv.cast()
+        self.assertEqual(self.tv.cast_app(), kt.DASHCAST_APP_ID)
+        self.assertTrue(self.tv.stop_cast(None, self.logs.append))
+        stop = [m for ns, _, m in self.rx.sent(kt.NS_RECEIVER) if m["type"] == "STOP"]
+        self.assertEqual([m.get("sessionId") for m in stop], ["session-1"])
+        self.assertIsNone(self.tv.cast_app())
+        self.assertIn("boys-room: cast stopped, receiver idle", self.logs)
+
+    def test_castcheck_casts_reads_and_stops(self):
+        with mock.patch.object(kt, "CAST_SETTLE_SECONDS", 0):
+            self.tv.castcheck(None, self.logs.append, wait=0)
+        types = [m["type"] for ns, _, m in self.rx.sent(kt.NS_RECEIVER)]
+        self.assertEqual(types.count("LAUNCH"), 1)
+        self.assertEqual(types.count("STOP"), 1)
+        self.assertIn("boys-room: castcheck: app running 0s after the cast: 84912283", self.logs)
+
+    def test_empty_status_is_unknown_and_the_stop_is_sent_anyway(self):
+        self.rx.apps = [{"appId": kt.DASHCAST_APP_ID, "isIdleScreen": False, "sessionId": "s", "transportId": "t"}]
+        self.rx.status_override = {}
+        with self.assertRaises(kt.TvError) as ctx:
+            self.tv.cast_app()
+        self.assertIn("unknown", str(ctx.exception))
+        with mock.patch.object(kt, "STOP_WAIT_SECONDS", 0):
+            self.tv.stop_cast(None, self.logs.append)
+        stops = [m for ns, _, m in self.rx.sent(kt.NS_RECEIVER) if m["type"] == "STOP"]
+        self.assertEqual(len(stops), 1)
+        self.assertNotIn("sessionId", stops[0])
+        self.assertTrue(any("stopping anyway" in m for m in self.logs))
+
+    def test_power_off_over_cast_stops_the_board_before_the_key(self):
+        self.rx.apps = [{"appId": kt.DASHCAST_APP_ID, "isIdleScreen": False, "sessionId": "s", "transportId": "t"}]
+        events = []
+        with mock.patch.object(kt.time, "sleep"), \
+                mock.patch.object(self.tv, "power_key", lambda state: events.append("key " + state)), \
+                mock.patch.object(self.tv, "power_mode", lambda: "off"):
+            real_stop = kt.stop_app
+            with mock.patch.object(kt, "stop_app", lambda host: (events.append("stop"), real_stop(host))):
+                self.tv.power_off_verified(None, self.logs.append)
+        self.assertEqual(events, ["stop", "key off"])
+
+    def test_receiver_that_is_not_listening_is_a_scrubbed_tv_error(self):
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+        closed.close()
+        kt.CAST_PORT = port  # restored by the CAST_PORT patch from setUp
+        with self.assertRaises(kt.TvError) as ctx:
+            self.tv.cast_app()
+        self.assertIn("refused", str(ctx.exception))
+        self.assertNotIn("fake-token-value", str(ctx.exception))
+        self.assertNotIn("127.0.0.1", str(ctx.exception))
+
+
+class CastMessageTests(unittest.TestCase):
+    def test_encoding_matches_the_protobuf_wire_format(self):
+        frame = kt.encode_cast_message("s", "d", "n", "{}")
+        self.assertEqual(frame, bytes.fromhex("00000011" "0800" "120173" "1a0164" "22016e" "2800" "32027b7d"))
+
+    def test_round_trip_with_long_and_unicode_payloads(self):
+        payload = json.dumps({"url": "https://example.invalid/" + "x" * 300, "note": "caf\u00e9"})
+        frame = kt.encode_cast_message("sender-0", "transport-9", kt.NS_DASHCAST, payload)
+        self.assertEqual(struct.unpack(">I", frame[:4])[0], len(frame) - 4)
+        self.assertEqual(kt.decode_cast_message(frame[4:]), {"source": "sender-0", "dest": "transport-9",
+                                                            "namespace": kt.NS_DASHCAST, "payload": payload})
+
+    def test_unknown_fields_are_skipped_and_damage_is_an_error(self):
+        body = kt.encode_cast_message("a", "b", "c", "{}")[4:] + bytes.fromhex("4801") + bytes.fromhex("5a0178")
+        self.assertEqual(kt.decode_cast_message(body)["payload"], "{}")
+        for bad in (bytes.fromhex("12"), bytes.fromhex("1205ab"), bytes.fromhex("0d00000000")):
+            with self.assertRaises(kt.CastError):
+                kt.decode_cast_message(bad)
+
+    def test_running_app_reads_idle_apps_and_unknown(self):
+        dash = {"appId": kt.DASHCAST_APP_ID, "sessionId": "s"}
+        self.assertEqual(kt.running_app({"applications": [dash]}), dash)
+        self.assertIsNone(kt.running_app({"applications": [{"appId": kt.BACKDROP_APP_ID}]}))
+        self.assertIsNone(kt.running_app({"applications": [{"appId": "X", "isIdleScreen": True}]}))
+        self.assertIsNone(kt.running_app({"volume": {"level": 0.2}}))
+        for status in (None, {}, [], {"applications": "x"}, {"applications": [5]}, {"applications": [{}]}):
+            with self.assertRaises(kt.CastError, msg=status):
+                kt.running_app(status)
+
+
+class CattOptInTests(unittest.TestCase):
+    """catt is used only when KIDS_TV_CATT (or --catt) names it; otherwise casting is over Cast."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        tv_dir(self.tmp.name)
+
+    def run_cast(self, env):
+        calls = []
+        with mock.patch.dict(os.environ, env), mock.patch.object(kt.time, "sleep"), \
+                mock.patch.object(kt.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="", stderr="")) as run, \
+                mock.patch.object(kt, "cast_site", lambda host, url: calls.append(url)), \
+                mock.patch("builtins.print"):
+            if "KIDS_TV_CATT" not in env:
+                os.environ.pop("KIDS_TV_CATT", None)
+            rc = kt.main(["--config-dir", self.tmp.name, "--log", self.tmp.name + "/l.log",
+                          "--state", self.tmp.name + "/s.json", "cast", "--tv", "boys-room"])
+        return rc, calls, run
+
+    def test_default_casts_over_cast_and_never_runs_catt(self):
+        rc, calls, run = self.run_cast({})
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [kt.BOARD_URL])
+        self.assertFalse(run.called)
+
+    def test_kids_tv_catt_routes_the_cast_to_catt(self):
+        rc, calls, run = self.run_cast({"KIDS_TV_CATT": "/fake/catt"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [])
+        cmd = run.call_args[0][0]
+        self.assertEqual(cmd[0], "/fake/catt")
+        self.assertEqual(cmd[-2:], ["cast_site", kt.BOARD_URL])
+
+    def test_catt_info_with_no_app_id_is_unknown_and_stops_anyway(self):
+        tv = kt.Tv("boys-room", self.tmp.name)
+        names, logs = [], []
+
+        def catt(path, *args):
+            names.append(" ".join(args))
+            return mock.Mock(returncode=0, stdout="{}", stderr="")
+
+        with mock.patch.object(tv, "_catt", catt), mock.patch.object(kt, "STOP_WAIT_SECONDS", 0):
+            tv.stop_cast("/fake/catt", logs.append)
+        self.assertIn("stop", names)
+        self.assertTrue(any("catt info gave no app_id, stopping anyway" in m for m in logs))
+
+
+class CastAlertTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = Path(self.tmp.name, "state.json")
+        self.alert = Path(self.tmp.name, "kids-tv-alert.json")
+        self.logs = []
+
+    def alerts(self):
+        return json.loads(self.alert.read_text())["alerts"] if self.alert.exists() else []
+
+    def test_first_cast_failure_and_the_last_try_alert_once_each(self):
+        rec = Recorder(fail={("cast", "girls-room")})
+        for minute in range(0, 12):
+            kt.tick(SCHEDULE, at(THU, 6, 0) + dt.timedelta(minutes=minute), self.state, rec.actions(),
+                    self.logs.append, alert_path=self.alert)
+        self.assertEqual(len([c for c in rec.calls if c == ("cast", "girls-room")]), kt.MAX_ATTEMPTS)
+        got = [(a["tv"], a["step"]) for a in self.alerts()]
+        self.assertEqual(got, [("girls-room", "cast"), ("girls-room", "cast-final")])
+        self.assertTrue(self.alerts()[0]["error"].startswith("first try failed: girls-room: boom"))
+        self.assertTrue(self.alerts()[1]["error"].startswith("gave up after 4 tries"))
+        self.assertEqual(set(self.alerts()[0]), {"date", "tv", "step", "error", "at"})
+
+    def test_a_cast_that_works_on_the_second_try_alerts_only_the_first_failure(self):
+        rec = Recorder(fail={("cast", "boys-room")})
+        kt.tick(SCHEDULE, at(THU, 6, 0), self.state, rec.actions(), self.logs.append, alert_path=self.alert)
+        rec.fail.clear()
+        kt.tick(SCHEDULE, at(THU, 6, 1), self.state, rec.actions(), self.logs.append, alert_path=self.alert)
+        self.assertEqual([(a["tv"], a["step"]) for a in self.alerts()], [("boys-room", "cast")])
+
+
+class NetcheckTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.alert = Path(self.tmp.name, "kids-tv-alert.json")
+        self.logs = []
+        self.targets = [("boys-room", "cast", "h1", 8009), ("boys-room", "smartcast", "h1", 7345),
+                        ("girls-room", "cast", "h2", 8009), ("girls-room", "sonos", "h3", 1400)]
+
+    def alerts(self):
+        return json.loads(self.alert.read_text())["alerts"] if self.alert.exists() else []
+
+    def run_check(self, results, **kw):
+        return kt.netcheck(self.targets, self.alert, self.logs.append, at(THU, 6, 0),
+                           check=lambda host, port: results(host, port), **kw)
+
+    def test_all_reachable_writes_no_alert(self):
+        self.assertEqual(self.run_check(lambda h, p: "ok"), 0)
+        self.assertEqual(self.alerts(), [])
+        self.assertTrue(self.logs[0].startswith("netcheck: boys-room cast:8009 ok"))
+
+    def test_every_connection_no_route_is_the_local_network_permission(self):
+        self.assertEqual(self.run_check(lambda h, p: "no route"), 4)
+        alerts = self.alerts()
+        self.assertEqual([(a["tv"], a["step"]) for a in alerts], [("all", "netcheck")])
+        self.assertTrue(alerts[0]["error"].startswith("Local Network permission blocked"))
+
+    def test_some_devices_down_names_each_and_is_not_the_permission(self):
+        self.assertEqual(self.run_check(lambda h, p: "ok" if h == "h1" else ("no route" if h == "h2" else "refused")), 2)
+        alerts = self.alerts()
+        self.assertEqual([(a["tv"], a["step"]) for a in alerts], [("girls-room", "netcheck")])
+        self.assertEqual(alerts[0]["error"], "unreachable: cast:8009 no route, sonos:1400 refused")
+
+    def test_settle_retries_until_the_network_is_up(self):
+        clock = {"t": 0.0}
+        tries = []
+
+        def check(host, port):
+            tries.append(clock["t"])
+            return "ok" if clock["t"] >= 20 else "no route"
+
+        with mock.patch.object(kt.time, "monotonic", lambda: clock["t"]), \
+                mock.patch.object(kt.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s)):
+            failing = self.run_check(check, settle=60)
+        self.assertEqual(failing, 0)
+        self.assertEqual(self.alerts(), [])
+        self.assertEqual(max(tries), 20)
+
+    def test_probe_classifies_real_and_refused_sockets_and_no_route(self):
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        self.addCleanup(server.close)
+        self.assertEqual(kt.probe("127.0.0.1", server.getsockname()[1]), "ok")
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+        closed.close()
+        self.assertEqual(kt.probe("127.0.0.1", port), "refused")
+        import errno
+        for code, want in ((errno.EHOSTUNREACH, "no route"), (errno.EHOSTDOWN, "host down"),
+                           (errno.ENETUNREACH, "network unreachable")):
+            with mock.patch.object(kt.socket, "create_connection", side_effect=OSError(code, os.strerror(code))):
+                self.assertEqual(kt.probe("10.1.2.3", 8009), want)
+        with mock.patch.object(kt.socket, "create_connection", side_effect=socket.timeout("timed out")):
+            self.assertEqual(kt.probe("10.1.2.3", 8009), "timed out")
+
+    def test_cli_netcheck_alerts_and_exits_1_without_printing_addresses(self):
+        tv_dir(self.tmp.name)
+        out = io.StringIO()
+        with mock.patch.object(kt, "probe", lambda host, port: "no route"), mock.patch("sys.stdout", out):
+            rc = kt.main(["--config-dir", self.tmp.name, "--log", self.tmp.name + "/l.log",
+                          "--alert", str(self.alert), "netcheck"])
+        self.assertEqual(rc, 1)
+        self.assertEqual([(a["tv"], a["step"]) for a in self.alerts()], [("all", "netcheck")])
+        text = Path(self.tmp.name, "l.log").read_text() + out.getvalue() + self.alert.read_text()
+        self.assertNotIn(IP, text)
+        self.assertIn("cast-info:8008", text)
+
+
+class AlertsCommandTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.alert = Path(self.tmp.name, "kids-tv-alert.json")
+        old = {"alerts": [{"date": "2026-10-29", "tv": "girls-room", "step": "on", "error": "boom",
+                           "at": "2026-10-29T06:00:00-07:00"}]}
+        self.alert.write_text(json.dumps(old, indent=1))
+        kt.write_alert(self.alert, THU, "boys-room", "cast", "first try failed", at(THU, 6, 1), lambda m: None)
+
+    def run_alerts(self, *extra):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            rc = kt.main(["--log", self.tmp.name + "/l.log", "--alert", str(self.alert), "alerts"] + list(extra))
+        return rc, out.getvalue()
+
+    def test_lists_unacknowledged_with_ids_and_ack_never_rewrites_the_alert_file(self):
+        rc, out = self.run_alerts("--json")
+        self.assertEqual(rc, 0)
+        shown = json.loads(out)["alerts"]
+        self.assertEqual([a["id"] for a in shown], ["2026-10-29/girls-room/on", "2026-10-29/boys-room/cast"])
+        before = self.alert.read_bytes()
+        self.assertEqual(self.run_alerts("--ack", "2026-10-29/girls-room/on")[0], 0)
+        self.assertEqual(self.alert.read_bytes(), before)
+        self.assertTrue(Path(self.tmp.name, "kids-tv-alert-ack.json").exists())
+        shown = json.loads(self.run_alerts("--json")[1])["alerts"]
+        self.assertEqual([a["id"] for a in shown], ["2026-10-29/boys-room/cast"])
+        everything = json.loads(self.run_alerts("--json", "--all")[1])["alerts"]
+        self.assertEqual([bool(a["acked"]) for a in everything], [True, False])
+        self.run_alerts("--ack-all")
+        self.assertIn("no unacknowledged alerts", self.run_alerts()[1])
+
+    def test_unknown_id_is_refused(self):
+        with mock.patch("sys.stderr"):
+            rc, _ = self.run_alerts("--ack", "2026-01-01/x/y")
+        self.assertEqual(rc, 1)
+        self.assertFalse(Path(self.tmp.name, "kids-tv-alert-ack.json").exists())
+
+    def test_missing_alert_file_is_no_alerts(self):
+        self.alert.unlink()
+        self.assertEqual(self.run_alerts(), (0, "no unacknowledged alerts\n"))
+
+
+class NetcheckPlistTests(unittest.TestCase):
+    def test_netcheck_plist_runs_netcheck_once_at_load_with_apples_python(self):
+        data = plistlib.loads((ROOT / "launchd" / "com.davidcasas.morningboard.kids-tv-netcheck.plist").read_bytes())
+        self.assertEqual(data["ProgramArguments"][0], "/usr/bin/python3")
+        self.assertEqual(data["ProgramArguments"][2:4], ["netcheck", "--settle"])
+        self.assertTrue(data["RunAtLoad"])
+        self.assertNotIn("StartInterval", data)
+        self.assertNotIn("KeepAlive", data)
+
+    def test_parser_default_is_no_catt(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("KIDS_TV_CATT", None)
+            self.assertIsNone(kt.build_parser().parse_args(["status"]).catt)
+
+
+class RawReceiver:
+    """A TLS server on 127.0.0.1 that sends fixed bytes after the handshake, then closes or goes quiet.
+    With tls=False it accepts and never speaks, so the client's TLS handshake waits.
+
+    It first reads the client's first `frames` messages: the CONNECT that
+    CastChannel sends on opening, plus any request sent before the client
+    reads (cast_info sends GET_STATUS, so 2). A socket closed with bytes still
+    unread sends a TCP reset, not a FIN, and a reset makes the client's recv
+    fail with ECONNRESET even when the bytes sent before it are already
+    waiting; and a reset that lands while the client is still sending fails
+    the send with EPIPE instead. Either way the error would depend on timing.
+    With reset=True it closes with SO_LINGER 0, which always sends a reset, as
+    a receiver dropping the connection does."""
+
+    def __init__(self, certfile, keyfile, data=b"", close=True, tls=True, reset=False, frames=1):
+        self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.ctx.load_cert_chain(certfile, keyfile)
+        self.data, self.close_after, self.tls, self.reset, self.frames = data, close, tls, reset, frames
+        self.done = threading.Event()
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(4)
+        self.port = self.sock.getsockname()[1]
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def close(self):
+        self.done.set()
+        self.sock.close()
+
+    def serve(self):
+        try:
+            raw, _ = self.sock.accept()
+        except OSError:
+            return
+        try:
+            conn = self.ctx.wrap_socket(raw, server_side=True) if self.tls else raw
+            for _ in range(self.frames if self.tls else 0):
+                self.read_exactly(conn, struct.unpack(">I", self.read_exactly(conn, 4))[0])
+            conn.sendall(self.data)
+            if not self.close_after:
+                self.done.wait(10)
+            if self.reset:
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            conn.close()
+        except OSError:
+            raw.close()
+
+    @staticmethod
+    def read_exactly(conn, size):
+        data = b""
+        while len(data) < size:
+            chunk = conn.recv(size - len(data))
+            if not chunk:
+                raise ConnectionError("client closed")
+            data += chunk
+        return data
+
+
+@unittest.skipUnless(OPENSSL, "openssl makes the fake receiver's certificate")
+class CastFrameAndDeadlineTests(unittest.TestCase):
+    """Damaged frames are clean errors, and one deadline covers connect, handshake and reads."""
+
+    setUpClass = classmethod(CastProtocolTests.setUpClass.__func__)
+    tearDownClass = classmethod(CastProtocolTests.tearDownClass.__func__)
+
+    def receiver(self, data=b"", close=True, tls=True, reset=False, frames=1):
+        rx = RawReceiver(self.cert, self.key, data, close, tls, reset, frames)
+        self.addCleanup(rx.close)
+        return rx
+
+    def recv_error(self, rx, timeout=2.0):
+        start = time.monotonic()
+        with self.assertRaises((kt.CastError, OSError)) as ctx:
+            with kt.CastChannel("127.0.0.1", rx.port, timeout=timeout) as ch:
+                ch.recv()
+        return ctx.exception, time.monotonic() - start
+
+    def test_partial_frame_then_close_is_a_connection_error(self):
+        exc, _ = self.recv_error(self.receiver(struct.pack(">I", 100) + b"x" * 10))
+        self.assertIsInstance(exc, ConnectionError)
+
+    def test_partial_frame_then_reset_is_a_connection_reset(self):
+        exc, _ = self.recv_error(self.receiver(struct.pack(">I", 100) + b"x" * 10, reset=True))
+        self.assertIsInstance(exc, ConnectionResetError)
+
+    def test_a_reset_mid_frame_fails_the_cast_read_like_a_bad_answer(self):
+        """The channel raises the reset as it is (OSError); the Tv methods the tick and the
+        manual commands call turn it into TvError, the same as a CastError, so it is logged,
+        retried and alerted like any failed cast."""
+        partial = struct.pack(">I", 100) + b"x" * 10
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        Path(tmp.name, "boys-room.env").write_text("VIZIO_BOYS_ROOM_IP=127.0.0.1\nVIZIO_BOYS_ROOM_TOKEN=fake-token-value\n")
+        tv = kt.Tv("boys-room", tmp.name)
+        with mock.patch.object(kt, "CAST_PORT", self.receiver(partial, reset=True, frames=2).port):
+            with self.assertRaises(kt.TvError) as ctx:
+                tv.cast_app()
+        self.assertIn("cast status failed: ConnectionResetError", str(ctx.exception))
+        with mock.patch.object(kt, "CAST_PORT", self.receiver(partial, reset=True, frames=2).port):
+            self.assertIn("ConnectionResetError", tv._cast_once(None))
+
+    def test_partial_frame_then_silence_times_out_at_the_deadline(self):
+        exc, took = self.recv_error(self.receiver(struct.pack(">I", 100) + b"x" * 10, close=False), timeout=1.0)
+        self.assertIsInstance(exc, socket.timeout)
+        self.assertLess(took, 1.5)
+
+    def test_oversized_frame_is_refused_before_reading_it(self):
+        exc, _ = self.recv_error(self.receiver(struct.pack(">I", kt.CAST_MAX_MESSAGE + 1), close=False))
+        self.assertIsInstance(exc, kt.CastError)
+        self.assertIn("too large", str(exc))
+
+    def test_garbage_frame_is_a_cast_error(self):
+        exc, _ = self.recv_error(self.receiver(struct.pack(">I", 5) + b"\xff" * 5))
+        self.assertIsInstance(exc, kt.CastError)
+
+    def test_slow_connect_and_a_silent_handshake_share_one_deadline(self):
+        rx = self.receiver(close=False, tls=False)
+        real = socket.create_connection
+
+        def slow_connect(*args, **kw):
+            time.sleep(0.6)
+            return real(*args, **kw)
+
+        start = time.monotonic()
+        with mock.patch.object(kt.socket, "create_connection", slow_connect):
+            with self.assertRaises(socket.timeout):
+                kt.CastChannel("127.0.0.1", rx.port, timeout=1.0)
+        self.assertLess(time.monotonic() - start, 1.4)
+
+
+class ManualStopTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        tv_dir(self.tmp.name)
+
+    def run_stop(self, idle):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(kt.Tv, "stop_cast", lambda tv, catt, log: idle), \
+                mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            rc = kt.main(["--config-dir", self.tmp.name, "--log", self.tmp.name + "/l.log",
+                          "--state", self.tmp.name + "/s.json", "stop", "--tv", "boys-room"])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_a_stop_that_never_reads_idle_fails_and_exits_1(self):
+        rc, out, err = self.run_stop(False)
+        self.assertEqual(rc, 1)
+        self.assertNotIn("stop sent", out)
+        self.assertIn("boys-room: stop failed", err)
+
+    def test_a_stop_that_reads_idle_prints_stop_sent(self):
+        rc, out, _ = self.run_stop(True)
+        self.assertEqual(rc, 0)
+        self.assertIn("boys-room: stop sent", out)
+
+
+class CastcheckPlistTests(unittest.TestCase):
+    def test_castcheck_plist_runs_castcheck_on_demand_with_apples_python(self):
+        path = ROOT / "launchd" / "com.davidcasas.morningboard.kids-tv-castcheck.plist"
+        data = plistlib.loads(path.read_bytes())
+        self.assertEqual(data["Label"], "com.davidcasas.morningboard.kids-tv-castcheck")
+        self.assertEqual(data["ProgramArguments"], ["/usr/bin/python3", "__REPO__/scripts/kids-tv.py",
+                                                    "castcheck", "--tv", "all"])
+        self.assertTrue(data["StandardOutPath"].startswith("__HOME__/"))
+        self.assertTrue(data["StandardErrorPath"].startswith("__HOME__/"))
+        for key in ("RunAtLoad", "StartInterval", "KeepAlive", "StartCalendarInterval"):
+            self.assertNotIn(key, data)
+
+
+class NetcheckTargetsTests(unittest.TestCase):
+    def test_a_tv_with_a_bad_config_is_reported_not_probed(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        tv_dir(tmp.name, keys=("boys-room",))
+        with mock.patch.object(kt, "sonos_config", None):
+            targets = kt.netcheck_targets(tmp.name)
+        self.assertEqual([t[:2] for t in targets], [("boys-room", "cast"), ("boys-room", "cast-info"),
+                                                    ("boys-room", "smartcast"), ("girls-room", "config")])
+        self.assertIsNone(targets[-1][2])
+        probed, logs = [], []
+        alert = Path(tmp.name, "alert.json")
+        failing = kt.netcheck(targets, alert, logs.append, at(THU, 6, 0),
+                              check=lambda host, port: probed.append(host) or "ok")
+        self.assertEqual(failing, 1)
+        self.assertEqual(probed, [IP] * 3)
+        alerts = json.loads(alert.read_text())["alerts"]
+        self.assertEqual([(a["tv"], a["step"]) for a in alerts], [("girls-room", "netcheck")])
+        self.assertIn("config not checked", alerts[0]["error"])
+        self.assertNotIn("t0ken", alert.read_text() + "".join(logs))
+
+
 if __name__ == "__main__":
     unittest.main()
