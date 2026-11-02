@@ -5,6 +5,10 @@
   ~/Library/LaunchAgents/. Replace __REPO__ and __HOME__. No sudo.
   Once a minute it runs `kids-tv.py tick`, which reads schedule.json and sends
   nothing to a TV unless a step is due. See README, "Kids' bedroom TVs".
+  It runs through MorningBoardTVHelper.app, which starts /usr/bin/python3 on
+  kids-tv.py as its child, so macOS Local Network privacy judges the app, not
+  com.apple.python3. Build and install the app first; see README, "Local
+  Network helper app", which also covers rolling back to plain python3.
   A user agent starts after login, not at the boot chime. Auto-login for
   casasmacmini-server is a dependency. After a reboot RunAtLoad ticks at once,
   and the state file keeps a step from repeating.
@@ -18,7 +22,7 @@
   <string>com.davidcasas.morningboard.kids-tv</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/python3</string>
+    <string>__HOME__/Applications/MorningBoardTVHelper.app/Contents/MacOS/kids-tv-helper</string>
     <string>__REPO__/scripts/kids-tv.py</string>
     <string>tick</string>
   </array>
