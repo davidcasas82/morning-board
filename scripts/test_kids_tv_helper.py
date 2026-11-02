@@ -76,7 +76,8 @@ class TemplateTests(unittest.TestCase):
 
     def test_netcheck_template_runs_once_with_a_settle(self):
         data = plistlib.loads(TEMPLATES["netcheck"].read_bytes())
-        self.assertEqual(data["ProgramArguments"][2:], ["netcheck", "--settle", "180"])
+        self.assertEqual(data["ProgramArguments"][2:],
+                         ["--log", "__HOME__/Library/Logs/kids-tv-helper-netcheck.log", "netcheck", "--settle", "180"])
         self.assertNotIn("StartInterval", data)
         self.assertNotIn("KeepAlive", data)
 

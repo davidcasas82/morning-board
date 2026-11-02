@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  PROTOTYPE, NOT INSTALLED. The kids-tv job run through MorningBoardTVHelper.app,
+  NOT LIVE YET. The kids-tv job run through MorningBoardTVHelper.app,
   so the Local Network permission belongs to that app bundle instead of to
   com.apple.python3. Same schedule as com.davidcasas.morningboard.kids-tv.plist:
   `kids-tv.py tick` once a minute and at login. It replaces that job; never load
