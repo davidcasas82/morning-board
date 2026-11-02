@@ -18,9 +18,11 @@
  * Exit status: the child's status; 128+N if the child died of signal N;
  * 64 for bad usage; 71 if Python could not be started.
  * SIGTERM, SIGINT and SIGHUP are passed on to the child. They are blocked
- * from just before the spawn until the child's pid is known, so one that
- * arrives in between is passed on rather than lost; the child starts with an
- * empty signal mask and their default actions.
+ * before their handlers are installed and stay blocked until the child's pid
+ * is known, so one that arrives any time before then is held and passed on,
+ * rather than killing this launcher with no child started or being dropped by
+ * a handler with no child to send it to. The child starts with an empty
+ * signal mask and their default actions.
  */
 #include <errno.h>
 #include <signal.h>
@@ -82,6 +84,11 @@ int main(int argc, char **argv) {
     sigaddset(&forwarded, SIGHUP);
     sigemptyset(&empty);
 
+    /* Held from here until child is set, then passed on by forward(). */
+    sigprocmask(SIG_BLOCK, &forwarded, &previous);
+#ifdef KIDS_TV_TEST_SIGNAL_BEFORE_HANDLERS
+    raise(KIDS_TV_TEST_SIGNAL_BEFORE_HANDLERS); /* test builds only: a signal before the handlers exist */
+#endif
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = forward;
@@ -96,8 +103,6 @@ int main(int argc, char **argv) {
     posix_spawnattr_setsigdefault(&attr, &forwarded);
     posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
 
-    /* A forwarded signal that arrives before child is set stays pending, then is passed on. */
-    sigprocmask(SIG_BLOCK, &forwarded, &previous);
 #ifdef KIDS_TV_TEST_SIGNAL_IN_SPAWN_WINDOW
     raise(KIDS_TV_TEST_SIGNAL_IN_SPAWN_WINDOW); /* test builds only: a signal before the child's pid is known */
 #endif
