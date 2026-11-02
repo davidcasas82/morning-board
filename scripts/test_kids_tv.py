@@ -2559,17 +2559,20 @@ class RawReceiver:
     """A TLS server on 127.0.0.1 that sends fixed bytes after the handshake, then closes or goes quiet.
     With tls=False it accepts and never speaks, so the client's TLS handshake waits.
 
-    It first reads the client's CONNECT, the one message CastChannel sends on
-    opening. A socket closed with bytes still unread sends a TCP reset, not a
-    FIN, and a reset makes the client's recv fail with ECONNRESET even when the
-    bytes sent before it are already waiting, so the error would depend on
-    timing. With reset=True it closes with SO_LINGER 0, which always sends a
-    reset, as a receiver dropping the connection does."""
+    It first reads the client's first `frames` messages: the CONNECT that
+    CastChannel sends on opening, plus any request sent before the client
+    reads (cast_info sends GET_STATUS, so 2). A socket closed with bytes still
+    unread sends a TCP reset, not a FIN, and a reset makes the client's recv
+    fail with ECONNRESET even when the bytes sent before it are already
+    waiting; and a reset that lands while the client is still sending fails
+    the send with EPIPE instead. Either way the error would depend on timing.
+    With reset=True it closes with SO_LINGER 0, which always sends a reset, as
+    a receiver dropping the connection does."""
 
-    def __init__(self, certfile, keyfile, data=b"", close=True, tls=True, reset=False):
+    def __init__(self, certfile, keyfile, data=b"", close=True, tls=True, reset=False, frames=1):
         self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.ctx.load_cert_chain(certfile, keyfile)
-        self.data, self.close_after, self.tls, self.reset = data, close, tls, reset
+        self.data, self.close_after, self.tls, self.reset, self.frames = data, close, tls, reset, frames
         self.done = threading.Event()
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
@@ -2588,7 +2591,7 @@ class RawReceiver:
             return
         try:
             conn = self.ctx.wrap_socket(raw, server_side=True) if self.tls else raw
-            if self.tls:
+            for _ in range(self.frames if self.tls else 0):
                 self.read_exactly(conn, struct.unpack(">I", self.read_exactly(conn, 4))[0])
             conn.sendall(self.data)
             if not self.close_after:
@@ -2617,8 +2620,8 @@ class CastFrameAndDeadlineTests(unittest.TestCase):
     setUpClass = classmethod(CastProtocolTests.setUpClass.__func__)
     tearDownClass = classmethod(CastProtocolTests.tearDownClass.__func__)
 
-    def receiver(self, data=b"", close=True, tls=True, reset=False):
-        rx = RawReceiver(self.cert, self.key, data, close, tls, reset)
+    def receiver(self, data=b"", close=True, tls=True, reset=False, frames=1):
+        rx = RawReceiver(self.cert, self.key, data, close, tls, reset, frames)
         self.addCleanup(rx.close)
         return rx
 
@@ -2646,11 +2649,11 @@ class CastFrameAndDeadlineTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         Path(tmp.name, "boys-room.env").write_text("VIZIO_BOYS_ROOM_IP=127.0.0.1\nVIZIO_BOYS_ROOM_TOKEN=fake-token-value\n")
         tv = kt.Tv("boys-room", tmp.name)
-        with mock.patch.object(kt, "CAST_PORT", self.receiver(partial, reset=True).port):
+        with mock.patch.object(kt, "CAST_PORT", self.receiver(partial, reset=True, frames=2).port):
             with self.assertRaises(kt.TvError) as ctx:
                 tv.cast_app()
         self.assertIn("cast status failed: ConnectionResetError", str(ctx.exception))
-        with mock.patch.object(kt, "CAST_PORT", self.receiver(partial, reset=True).port):
+        with mock.patch.object(kt, "CAST_PORT", self.receiver(partial, reset=True, frames=2).port):
             self.assertIn("ConnectionResetError", tv._cast_once(None))
 
     def test_partial_frame_then_silence_times_out_at_the_deadline(self):
