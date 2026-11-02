@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Kids' TVs: after each login (so after the weekly restart), check once that
+  the job's Python may reach the TVs and Sonos speakers on the local network.
+  It opens one TCP connection to each port the job uses and closes it; no TV
+  or speaker is asked to do anything. A block or an unreachable device is
+  written to the alert file. See README, "Network check".
+  It runs /usr/bin/python3 itself, as the kids-tv job does, so it gets the
+  same Local Network permission. Do not call it from a shell script job.
+  User LaunchAgent for ~/Library/LaunchAgents/. Replace __REPO__ and __HOME__.
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv-netcheck.plist
+  Stop it with:
+    launchctl bootout gui/$(id -u)/com.davidcasas.morningboard.kids-tv-netcheck
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.davidcasas.morningboard.kids-tv-netcheck</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__REPO__/scripts/kids-tv.py</string>
+    <string>netcheck</string>
+    <string>--settle</string>
+    <string>180</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/kids-tv-netcheck.out</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/kids-tv-netcheck.err</string>
+</dict>
+</plist>

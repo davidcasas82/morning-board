@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Kids' TVs: a one-off, hand-run test that casting works from launchd. It
+  casts the board to each TV, reads that the cast app is running, and stops
+  it. It runs only when kickstarted (no RunAtLoad, no interval), and it powers
+  no TV on or off. Use it only in a test window agreed beforehand.
+  Copy to ~/Library/LaunchAgents/, replace __REPO__ and __HOME__, then:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv-castcheck.plist
+    launchctl kickstart gui/$(id -u)/com.davidcasas.morningboard.kids-tv-castcheck
+  Remove it afterwards:
+    launchctl bootout gui/$(id -u)/com.davidcasas.morningboard.kids-tv-castcheck
+    rm ~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv-castcheck.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.davidcasas.morningboard.kids-tv-castcheck</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__REPO__/scripts/kids-tv.py</string>
+    <string>castcheck</string>
+    <string>--tv</string>
+    <string>all</string>
+  </array>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/kids-tv-castcheck.out</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/kids-tv-castcheck.err</string>
+</dict>
+</plist>

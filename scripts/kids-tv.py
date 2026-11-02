@@ -14,6 +14,9 @@ logged for the day. See README, "Calendar run days".
     kids-tv.py plan [--date YYYY-MM-DD] [--json]   print the times, touch no TV
     kids-tv.py tick                                what launchd runs every minute
     kids-tv.py on|cast|off|status [--tv NAME]      one manual action, [--dry-run]
+    kids-tv.py info|stop|castcheck [--tv NAME]     read, stop, or cast-then-check-then-stop the cast
+    kids-tv.py netcheck [--settle SECONDS]         open each TV and Sonos port once; alert on a block
+    kids-tv.py alerts [--json] [--all] [--ack ID ... | --ack-all]   the alerts not yet acknowledged
 
 tick sends nothing to a TV outside the window: one power-on and cast per TV
 after alarm, one power-off per TV after on-the-road. Each is recorded in a
@@ -37,7 +40,9 @@ Which env file belongs to which TV is local to the mini, in
 neutral keys boys-room and girls-room. Tokens come from
 ~/.config/vizio/<env file> and are used only inside this script. They are
 never printed, logged, or put on a command line.
-Python 3.9 standard library only. Casting uses the catt binary.
+Python 3.9 standard library only. Casting speaks the Cast protocol itself (see the
+Cast section), inside this process; the catt binary is used only when asked for
+with KIDS_TV_CATT or --catt.
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
+import errno
 import fcntl
 import http.client
 import ipaddress
@@ -53,6 +59,7 @@ import os
 import re
 import socket
 import ssl
+import struct
 import subprocess
 import sys
 import time
@@ -506,6 +513,249 @@ def run_for_output(cmd: List[str]) -> Optional[str]:
     return out
 
 
+# ---------------------------------------------------------------------- Cast
+#
+# Cast v2, standard library only: a TLS connection to the receiver's port 8009
+# carrying CastMessage protobufs, each after its 4-byte big-endian length, with
+# JSON payloads. It runs inside this process, so under launchd it has the job's
+# own Local Network permission; a catt child process (another Python) was
+# blocked there. cast_site does what `catt cast_site` does: launch the DashCast
+# receiver app, always (catt forces it, since DashCast stops answering once a
+# page is loaded), and send it the URL with force on.
+
+CAST_PORT = 8009
+CAST_TIMEOUT = 10  # seconds for one Cast operation, connect included
+CAST_MAX_MESSAGE = 1 << 20
+SENDER_ID = "sender-0"
+RECEIVER_ID = "receiver-0"
+NS_CONNECTION = "urn:x-cast:com.google.cast.tp.connection"
+NS_HEARTBEAT = "urn:x-cast:com.google.cast.tp.heartbeat"
+NS_RECEIVER = "urn:x-cast:com.google.cast.receiver"
+NS_DASHCAST = "urn:x-cast:com.madmod.dashcast"
+DASHCAST_APP_ID = "84912283"
+
+
+class CastError(TvError):
+    """The receiver answered, but not as expected."""
+
+
+def _varint(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte, value = value & 0x7F, value >> 7
+        out.append(byte | (0x80 if value else 0))
+        if not value:
+            return bytes(out)
+
+
+def _read_varint(data: bytes, pos: int):
+    result = shift = 0
+    while True:
+        if pos >= len(data) or shift > 63:
+            raise CastError("bad Cast message: truncated number")
+        byte = data[pos]
+        pos += 1
+        result |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return result, pos
+        shift += 7
+
+
+def encode_cast_message(source: str, dest: str, namespace: str, payload: str) -> bytes:
+    """One framed CastMessage: protocol CASTV2_1_0, a text payload, the length first."""
+    def text(field: int, value: str) -> bytes:
+        raw = value.encode("utf-8")
+        return _varint(field << 3 | 2) + _varint(len(raw)) + raw
+
+    body = (_varint(1 << 3) + _varint(0) + text(2, source) + text(3, dest) + text(4, namespace)
+            + _varint(5 << 3) + _varint(0) + text(6, payload))
+    return struct.pack(">I", len(body)) + body
+
+
+def decode_cast_message(body: bytes) -> Dict[str, str]:
+    """source, dest, namespace and payload of one CastMessage (without its length). Other fields are skipped."""
+    names = {2: "source", 3: "dest", 4: "namespace", 6: "payload", 7: "payload"}
+    out = {"source": "", "dest": "", "namespace": "", "payload": ""}
+    pos = 0
+    while pos < len(body):
+        key, pos = _read_varint(body, pos)
+        field, wire = key >> 3, key & 7
+        if wire == 0:
+            _, pos = _read_varint(body, pos)
+        elif wire == 2:
+            size, pos = _read_varint(body, pos)
+            if pos + size > len(body):
+                raise CastError("bad Cast message: a field runs past the end")
+            if field in names:
+                out[names[field]] = body[pos:pos + size].decode("utf-8", "replace")
+            pos += size
+        else:
+            raise CastError("bad Cast message: wire type %d" % wire)
+    return out
+
+
+class CastChannel:
+    """One TLS connection to a Cast receiver. All reads and writes share one deadline.
+
+    Opening it connects to the platform receiver. A PING from the receiver is
+    answered with a PONG while reading. Socket errors are raised as they are
+    (OSError); answers that make no sense raise CastError.
+    """
+
+    def __init__(self, host: str, port: Optional[int] = None, timeout: float = CAST_TIMEOUT):
+        self._deadline = time.monotonic() + timeout
+        self._request_id = 0
+        self._buffer = b""
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE  # a Cast receiver's certificate is self-signed
+        raw = socket.create_connection((host, port or CAST_PORT), timeout=timeout)
+        try:
+            self._sock = ctx.wrap_socket(raw)
+        except BaseException:
+            raw.close()
+            raise
+        self.connect(RECEIVER_ID)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._sock.close()
+        return False
+
+    def connect(self, dest: str) -> None:
+        self.send(NS_CONNECTION, {"type": "CONNECT", "origin": {}}, dest)
+
+    def send(self, namespace: str, payload: dict, dest: str = RECEIVER_ID) -> int:
+        """Send one message. Receiver and app messages get a new requestId, which is returned (else 0)."""
+        payload = dict(payload)
+        request_id = 0
+        if namespace not in (NS_CONNECTION, NS_HEARTBEAT):
+            self._request_id += 1
+            request_id = payload["requestId"] = self._request_id
+        self._sock.settimeout(max(0.01, self._deadline - time.monotonic()))
+        self._sock.sendall(encode_cast_message(SENDER_ID, dest, namespace, json.dumps(payload)))
+        return request_id
+
+    def _read(self, size: int) -> bytes:
+        while len(self._buffer) < size:
+            left = self._deadline - time.monotonic()
+            if left <= 0:
+                raise socket.timeout("timed out")
+            self._sock.settimeout(left)
+            chunk = self._sock.recv(65536)
+            if not chunk:
+                raise ConnectionError("the receiver closed the connection")
+            self._buffer += chunk
+        data, self._buffer = self._buffer[:size], self._buffer[size:]
+        return data
+
+    def recv(self) -> dict:
+        """The next message, as decode_cast_message gives it plus "data": its JSON object ({} if none)."""
+        size = struct.unpack(">I", self._read(4))[0]
+        if size > CAST_MAX_MESSAGE:
+            raise CastError("Cast message too large")
+        msg = decode_cast_message(self._read(size))
+        try:
+            data = json.loads(msg["payload"])
+        except ValueError:
+            data = None
+        msg["data"] = data if isinstance(data, dict) else {}
+        if msg["namespace"] == NS_HEARTBEAT and msg["data"].get("type") == "PING":
+            self.send(NS_HEARTBEAT, {"type": "PONG"}, msg["source"] or RECEIVER_ID)
+        return msg
+
+    def request(self, namespace: str, payload: dict, dest: str = RECEIVER_ID) -> dict:
+        """Send, then read until the answer with the same requestId; returns its JSON."""
+        request_id = self.send(namespace, payload, dest)
+        while True:
+            data = self.recv()["data"]
+            if data.get("requestId") == request_id:
+                return data
+
+
+def running_app(status) -> Optional[dict]:
+    """The app casting, from a RECEIVER_STATUS "status": None when idle (no app, or only the idle screen).
+
+    A missing or empty status, or an app list that is not a list, is unknown and
+    raises CastError: unknown is never taken for idle.
+    """
+    if not isinstance(status, dict) or not status:
+        raise CastError("receiver status is empty, so the cast state is unknown")
+    apps = status.get("applications", [])
+    if not isinstance(apps, list):
+        raise CastError("receiver status has no readable app list, so the cast state is unknown")
+    for app in apps:
+        if not isinstance(app, dict):
+            raise CastError("receiver status has an unreadable app, so the cast state is unknown")
+        if app.get("isIdleScreen") is True or app.get("appId") == BACKDROP_APP_ID:
+            continue
+        if not app.get("appId"):
+            raise CastError("receiver status has an app with no ID, so the cast state is unknown")
+        return app
+    return None
+
+
+def receiver_status(ch: CastChannel):
+    answer = ch.request(NS_RECEIVER, {"type": "GET_STATUS"})
+    if answer.get("type") != "RECEIVER_STATUS":
+        raise CastError("receiver answered %s to GET_STATUS" % (answer.get("type") or "nothing"))
+    return answer.get("status")
+
+
+def cast_info(host: str) -> dict:
+    """The receiver's status (applications, volume, ...)."""
+    with CastChannel(host) as ch:
+        return receiver_status(ch)
+
+
+def cast_site(host: str, url: str) -> dict:
+    """Launch DashCast (even if it is running) and send it the URL, as catt cast_site does.
+
+    The answer to LAUNCH must come first; the DashCast app with a transport from
+    then on is the new one. Then the URL goes to that app, and a re-read must
+    still show DashCast running. Returns that app.
+    """
+    with CastChannel(host) as ch:
+        launch_id = ch.send(NS_RECEIVER, {"type": "LAUNCH", "appId": DASHCAST_APP_ID})
+        answered = False
+        while True:
+            data = ch.recv()["data"]
+            if data.get("requestId") == launch_id:
+                answered = True
+                if data.get("type") != "RECEIVER_STATUS":
+                    raise CastError("launch answered %s %s" % (data.get("type") or "nothing", data.get("reason") or ""))
+            if not answered or data.get("type") != "RECEIVER_STATUS":
+                continue
+            app = running_app(data.get("status"))
+            if app and app.get("appId") == DASHCAST_APP_ID and app.get("transportId"):
+                break
+        transport = str(app["transportId"])
+        ch.connect(transport)
+        ch.send(NS_DASHCAST, {"url": url, "force": True, "reload": False, "reload_time": 0,
+                              "sessionId": app.get("sessionId")}, transport)
+        after = running_app(receiver_status(ch))
+        if not after or after.get("appId") != DASHCAST_APP_ID:
+            raise CastError("the cast app is not running after the page was sent")
+        return after
+
+
+def stop_app(host: str) -> None:
+    """Quit the app casting, by its session. With no readable status, send STOP anyway, with no session."""
+    with CastChannel(host) as ch:
+        try:
+            app = running_app(receiver_status(ch))
+        except CastError:
+            app = {}
+        if app is None:
+            return
+        message = {"type": "STOP"}
+        if app.get("sessionId"):
+            message["sessionId"] = app["sessionId"]
+        ch.request(NS_RECEIVER, message)
+
+
 class Tv:
     def __init__(self, name: str, config_dir, log: Optional[Callable] = None):
         self.name = name
@@ -604,8 +854,19 @@ class Tv:
         return subprocess.run([catt, "-d", self._ip] + list(args), stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=30)
 
-    def cast_app(self, catt: str) -> Optional[str]:
-        """The receiver app running on the TV's Chromecast, or None when it is idle."""
+    def cast_app(self, catt: Optional[str] = None) -> Optional[str]:
+        """The receiver app running on the TV's Chromecast, or None when it reads idle.
+
+        With catt (opt-in), from `catt info -j`; else over Cast. A status that
+        cannot be read, or that says nothing (catt prints {} when it found no
+        device), raises TvError: unknown is never idle.
+        """
+        if not catt:
+            try:
+                app = running_app(cast_info(self._ip))
+            except (TvError, OSError) as exc:
+                raise TvError("%s: cast status failed: %s" % (self.name, self._scrub(describe_error(exc))))
+            return str(app["appId"]) if app else None
         try:
             done = self._catt(catt, "info", "-j")
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -617,10 +878,12 @@ class Tv:
         if not isinstance(info, dict):
             raise TvError("%s: cast status failed: exit %d %s" % (self.name, done.returncode,
                                                                    self._scrub(output_tail(done))))
+        if "app_id" not in info:
+            raise TvError("%s: cast status unknown: catt info gave no app_id" % self.name)
         app = info.get("app_id")
         return None if not app or app == BACKDROP_APP_ID else str(app)
 
-    def stop_cast(self, catt: str, log: Callable) -> bool:
+    def stop_cast(self, catt: Optional[str], log: Callable) -> bool:
         """Quit whatever is casting and wait until the receiver is idle, STOP_WAIT_SECONDS at most.
 
         A TV powered off while the board is still casting can wake itself back up,
@@ -631,12 +894,7 @@ class Tv:
                 return True
         except TvError as exc:
             log("%s, stopping anyway" % exc)
-        try:
-            done = self._catt(catt, "stop")
-            if done.returncode != 0:
-                log("%s: cast stop exited %d %s" % (self.name, done.returncode, self._scrub(output_tail(done))))
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            log("%s: cast stop failed: %s" % (self.name, self._scrub(describe_error(exc))))
+        self._stop(catt, log)
         deadline = time.monotonic() + STOP_WAIT_SECONDS
         last = ""
         while True:
@@ -652,7 +910,18 @@ class Tv:
                 return False
             time.sleep(1)
 
-    def power_off_verified(self, catt: str, log: Callable) -> None:
+    def _stop(self, catt: Optional[str], log: Callable) -> None:
+        try:
+            if not catt:
+                stop_app(self._ip)
+                return
+            done = self._catt(catt, "stop")
+            if done.returncode != 0:
+                log("%s: cast stop exited %d %s" % (self.name, done.returncode, self._scrub(output_tail(done))))
+        except (TvError, OSError, subprocess.TimeoutExpired) as exc:
+            log("%s: cast stop failed: %s" % (self.name, self._scrub(describe_error(exc))))
+
+    def power_off_verified(self, catt: Optional[str], log: Callable) -> None:
         """Stop the cast, power off, and make sure it stays off.
 
         After each power-off the power state is read at OFF_CHECKS seconds. If it
@@ -692,23 +961,46 @@ class Tv:
         log("ERROR: " + message)
         raise OffDidNotStick(message)
 
-    def cast(self, catt: str) -> None:
-        cmd = [catt, "-d", self._ip, "cast_site", BOARD_URL]
+    def cast(self, catt: Optional[str] = None) -> None:
+        """Cast the board, up to CAST_TRIES times: over Cast (cast_site), or with catt when it is given."""
         time.sleep(CAST_SETTLE_SECONDS)
         last = ""
         for attempt in range(CAST_TRIES):
-            try:
-                done = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True,
-                                      text=True, timeout=60)
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                last = self._scrub(describe_error(exc))
-            else:
-                if done.returncode == 0:
-                    return
-                last = "exit %d %s" % (done.returncode, self._scrub(output_tail(done)))
+            last = self._cast_once(catt)
+            if last is None:
+                return
             if attempt + 1 < CAST_TRIES:
                 time.sleep(CAST_RETRY_SECONDS)
         raise TvError("%s: cast failed (%s)" % (self.name, last.strip()))
+
+    def _cast_once(self, catt: Optional[str]) -> Optional[str]:
+        """None when the cast went out, else why not (scrubbed)."""
+        if not catt:
+            try:
+                cast_site(self._ip, BOARD_URL)
+            except (TvError, OSError) as exc:
+                return self._scrub(describe_error(exc))
+            return None
+        try:
+            done = subprocess.run([catt, "-d", self._ip, "cast_site", BOARD_URL], stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return self._scrub(describe_error(exc))
+        if done.returncode == 0:
+            return None
+        return "exit %d %s" % (done.returncode, self._scrub(output_tail(done)))
+
+    def castcheck(self, catt: Optional[str], log: Callable, wait: float = 10) -> None:
+        """Cast the board, read that the cast app runs, stop it, read idle. Raises TvError on any miss."""
+        self.cast(catt)
+        time.sleep(wait)
+        app = self.cast_app(catt)
+        log("%s: castcheck: app running %ss after the cast: %s" % (self.name, wait, app or "none"))
+        stopped = self.stop_cast(catt, log)
+        if app != DASHCAST_APP_ID or not stopped:
+            raise TvError("%s: castcheck failed: cast app %s, %s" % (
+                self.name, "running" if app == DASHCAST_APP_ID else "not running",
+                "stopped" if stopped else "not read idle after the stop"))
 
 
 # --------------------------------------------------------------- tick logic
@@ -852,6 +1144,68 @@ def write_alert(path, day: dt.date, tv: str, step: str, error: str, now: dt.date
     log("ALERT: %s: %s: %s%s" % (tv, step, error, note))
 
 
+def alert_id(entry: dict) -> str:
+    """An alert's stable ID: date/tv/step, which write_alert never repeats."""
+    return "%s/%s/%s" % (entry.get("date"), entry.get("tv"), entry.get("step"))
+
+
+def alert_ack_path(alert_path) -> Path:
+    """Acknowledgements live in their own file, so a reader never rewrites the alert file the job writes."""
+    path = Path(alert_path)
+    return path.with_name(path.stem + "-ack.json")
+
+
+def read_alerts(path) -> List[dict]:
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        raise StateError("the alert file is unreadable")
+    if not isinstance(data, dict) or not isinstance(data.get("alerts"), list):
+        raise StateError("the alert file has no alerts list")
+    return [a for a in data["alerts"] if isinstance(a, dict)]
+
+
+def alerts_command(alert_path, ack: List[str], ack_all: bool, show_all: bool, as_json: bool,
+                   now: dt.datetime) -> int:
+    """List the alerts not yet acknowledged (all with show_all), or acknowledge some or all.
+
+    The ack file is {"acked": {"<id>": "<when>"}}, pruned to IDs still in the
+    alert file. The alert file itself is only read here.
+    """
+    alerts = read_alerts(alert_path)
+    ack_file = alert_ack_path(alert_path)
+    try:
+        acked = json.loads(ack_file.read_text(encoding="utf-8")).get("acked", {})
+    except (OSError, ValueError, AttributeError):
+        acked = {}
+    if not isinstance(acked, dict):
+        acked = {}
+    ids = [alert_id(a) for a in alerts]
+    if ack or ack_all:
+        unknown = [i for i in ack if i not in ids]
+        if unknown:
+            sys.stderr.write("ERROR: no such alert: %s\n" % ", ".join(unknown))
+            return 1
+        stamp = now.isoformat(timespec="seconds")
+        for i in (ids if ack_all else ack):
+            acked.setdefault(i, stamp)
+        save_state(ack_file, {"acked": {i: acked[i] for i in ids if i in acked}})
+        print("acknowledged %d alert(s)" % len([i for i in ids if i in acked]))
+        return 0
+    shown = [dict(a, id=alert_id(a), acked=acked.get(alert_id(a))) for a in alerts
+             if show_all or alert_id(a) not in acked]
+    if as_json:
+        print(json.dumps({"alerts": shown}, indent=1))
+    else:
+        for a in shown:
+            print("%s  %s%s: %s" % (a["id"], a.get("at"), " (acked)" if a["acked"] else "", a.get("error")))
+        if not shown:
+            print("no alerts" if show_all else "no unacknowledged alerts")
+    return 0
+
+
 def attempt(name: str, step: str, st: dict, now: dt.datetime, state_path, state: dict,
             actions: Dict[str, Callable], log: Callable, alert_path=None) -> bool:
     """Run one step, writing the intent to the state file BEFORE acting.
@@ -859,8 +1213,10 @@ def attempt(name: str, step: str, st: dict, now: dt.datetime, state_path, state:
     If the state cannot be written, StateError is raised and nothing is sent. The
     step is marked done first and unmarked only when the TV reports a failure,
     so a crash or a failed write afterwards can never repeat a send.
-    The first failed power-on of the day, and an off that did not stick, are
-    also written as an alert (write_alert). Returns True when the step went out.
+    The first failed power-on of the day, an off that did not stick, the first
+    failed cast (step "cast") and the last allowed cast try failing (step
+    "cast-final") are also written as an alert (write_alert). Returns True when
+    the step went out.
     """
     st[DONE_KEY[step]] = now.isoformat()
     st[step + "_tries"] = st.get(step + "_tries", 0) + 1
@@ -886,6 +1242,11 @@ def attempt(name: str, step: str, st: dict, now: dt.datetime, state_path, state:
             if step == "on" and not st.get("on_alerted"):
                 st["on_alerted"] = now.isoformat()
                 write_alert(alert_path, now.date(), name, "on", str(exc), now, log)
+            if step == "cast" and st["cast_tries"] == 1:
+                write_alert(alert_path, now.date(), name, "cast", "first try failed: %s" % exc, now, log)
+            if step == "cast" and st["cast_tries"] >= MAX_ATTEMPTS:
+                write_alert(alert_path, now.date(), name, "cast-final",
+                            "gave up after %d tries: %s" % (st["cast_tries"], exc), now, log)
         try:
             save_state(state_path, state)
         except StateError:
@@ -1485,6 +1846,91 @@ def sonos_evening_sync(schedule, now, state, state_path, alert_path, log, dry_ru
     return failures
 
 
+# ------------------------------------------------------------------ netcheck
+#
+# Open one TCP connection to every port the job uses and close it at once; no
+# TV or speaker is asked to do anything. Run from launchd right after a login
+# (see README), it shows whether this Python may reach the local network. macOS
+# Local Network privacy refuses a blocked process at once with "No route to
+# host" (EHOSTUNREACH), so every address failing that way, with none reachable,
+# is reported as that permission being blocked. A mix means some devices are
+# down or moved, and each is named.
+
+NETCHECK_TIMEOUT = 3
+NETCHECK_RETRY_SECONDS = 10
+BLOCKED_CAUSE = "Local Network permission blocked"
+
+
+def probe(host: str, port: int, timeout: float = NETCHECK_TIMEOUT) -> str:
+    """"ok", or why a TCP connection failed: "no route", "network unreachable", "host down",
+    "refused", "timed out", or the error named."""
+    try:
+        socket.create_connection((host, port), timeout=timeout).close()
+        return "ok"
+    except ConnectionRefusedError:
+        return "refused"
+    except socket.timeout:
+        return "timed out"
+    except OSError as exc:
+        named = {errno.EHOSTUNREACH: "no route", errno.ENETUNREACH: "network unreachable",
+                 errno.EHOSTDOWN: "host down"}
+        return named.get(exc.errno) or redact_ips(describe_error(exc).replace(host, "<ip>"))
+
+
+def netcheck_targets(config_dir) -> List[tuple]:
+    """(key, what, host, port) for each TV's Cast, Cast info and SmartCast ports and each Sonos room.
+    A TV whose env file cannot be read is (key, what, None, error)."""
+    targets = []
+    for name in TVS:
+        try:
+            ip = Tv(name, config_dir)._ip
+        except TvError as exc:
+            targets.append((name, "config", None, str(exc)))
+            continue
+        for what, port in (("cast", CAST_PORT), ("cast-info", CAST_INFO_PORT), ("smartcast", VIZIO_PORT)):
+            targets.append((name, what, ip, port))
+    for key, room in (sonos_config or {}).get("rooms", {}).items():
+        targets.append((key, "sonos", room["ip"], SONOS_PORT))
+    return targets
+
+
+def netcheck(targets: List[tuple], alert_path, log: Callable, now: dt.datetime, settle: float = 0,
+             check: Optional[Callable] = None) -> int:
+    """Probe every target; retry the failing ones every NETCHECK_RETRY_SECONDS for up to `settle` seconds
+    (a network still coming up after login). Logs one line, alerts, returns the number still failing.
+
+    Every probed target "no route" (none ok): one alert, tv "all", naming
+    BLOCKED_CAUSE. Otherwise one alert per key with failures, naming each.
+    """
+    check = check or probe
+    results = {}
+    for key, what, host, port in targets:
+        results[(key, what)] = check(host, port) if host else "not checked: %s" % port
+    deadline = time.monotonic() + settle
+    while time.monotonic() < deadline and any(r != "ok" and not r.startswith("not checked")
+                                              for r in results.values()):
+        time.sleep(NETCHECK_RETRY_SECONDS)
+        for key, what, host, port in targets:
+            if host and results[(key, what)] != "ok":
+                results[(key, what)] = check(host, port)
+    ports = {(key, what): port for key, what, host, port in targets if host}
+    text = {k: "%s:%s %s" % (k[1], ports[k], r) if k in ports else "%s %s" % (k[1], r) for k, r in results.items()}
+    log("netcheck: " + ", ".join("%s %s" % (k[0], text[k]) for k in results))
+    failing = [k for k, r in results.items() if r != "ok"]
+    if not failing:
+        return 0
+    probed = [r for k, r in results.items() if k in ports]
+    if probed and all(r == "no route" for r in probed):
+        write_alert(alert_path, now.date(), "all", "netcheck",
+                    "%s: every connection failed at once with no route to host (%s)"
+                    % (BLOCKED_CAUSE, ", ".join("%s %s" % (k[0], text[k]) for k in failing)), now, log)
+        return len(failing)
+    for key in dict.fromkeys(k[0] for k in failing):
+        write_alert(alert_path, now.date(), key, "netcheck",
+                    "unreachable: " + ", ".join(text[k] for k in failing if k[0] == key), now, log)
+    return len(failing)
+
+
 # ----------------------------------------------------------------------- cli
 
 
@@ -1498,7 +1944,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--log", default=str(HOME / "Library" / "Logs" / "kids-tv-morning-board.log"))
     p.add_argument("--alert", default=None, help="alert file (default: KIDS_TV_ALERT, or "
                    "~/Library/Application Support/morning-board/kids-tv-alert.json)")
-    p.add_argument("--catt", default=os.environ.get("KIDS_TV_CATT", str(HOME / "Tools" / "catt-venv" / "bin" / "catt")))
+    p.add_argument("--catt", default=os.environ.get("KIDS_TV_CATT") or None,
+                   help="cast with this catt binary instead of over Cast (default: KIDS_TV_CATT, else none)")
     sub = p.add_subparsers(dest="cmd", required=True)
     plan = sub.add_parser("plan", help="print on and off times for a date; touches no TV")
     plan.add_argument("--date", help="YYYY-MM-DD (default: today)")
@@ -1507,10 +1954,19 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--now", help="ISO local time, for dry runs")
     t.add_argument("--dry-run", action="store_true", help="print the due steps, send nothing, save nothing")
     for cmd, text in (("on", "power on, then cast"), ("cast", "cast the board only"),
-                      ("off", "power off"), ("status", "read the power state")):
+                      ("off", "power off"), ("status", "read the power state"),
+                      ("info", "read the cast app running"), ("stop", "stop the cast"),
+                      ("castcheck", "cast the board, read it runs, stop it")):
         a = sub.add_parser(cmd, help=text + " (manual; does not touch the daily state)")
         a.add_argument("--tv", choices=list(TVS) + ["all"], default="all")
         a.add_argument("--dry-run", action="store_true", help="print the steps, send nothing")
+    n = sub.add_parser("netcheck", help="open each TV and Sonos port once; alert if blocked or unreachable")
+    n.add_argument("--settle", type=float, default=0, help="retry failures for up to this many seconds")
+    al = sub.add_parser("alerts", help="list alerts not yet acknowledged, or acknowledge them")
+    al.add_argument("--json", action="store_true")
+    al.add_argument("--all", action="store_true", help="include acknowledged alerts")
+    al.add_argument("--ack", nargs="+", default=[], metavar="ID", help="acknowledge these alert IDs")
+    al.add_argument("--ack-all", action="store_true", help="acknowledge every alert in the file")
     return p
 
 
@@ -1535,6 +1991,9 @@ def make_actions(args, log: Callable) -> Dict[str, Callable]:
         "off": off,
         "cast": lambda n: tv(n).cast(args.catt),
         "status": lambda n: print("%s: %s" % (n, tv(n).power_mode())),
+        "info": lambda n: print("%s: cast app %s" % (n, tv(n).cast_app(args.catt) or "none (idle)")),
+        "stop": lambda n: tv(n).stop_cast(args.catt, log),
+        "castcheck": lambda n: tv(n).castcheck(args.catt, log),
     }
 
 
@@ -1581,6 +2040,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             if tv_error is not None:
                 raise tv_error
             return 1 if failed else 0
+        if args.cmd == "netcheck":
+            now = dt.datetime.now().astimezone()
+            failing = netcheck(netcheck_targets(args.config_dir), args.alert or default_alert_path(), log, now,
+                               settle=args.settle)
+            print("netcheck: %s" % ("all reachable" if not failing else "%d failing, see the log" % failing))
+            return 1 if failing else 0
+        if args.cmd == "alerts":
+            return alerts_command(args.alert or default_alert_path(), args.ack, args.ack_all, args.all,
+                                  args.json, dt.datetime.now().astimezone())
         actions = make_actions(args, log)
         names = list(TVS) if args.tv == "all" else [args.tv]
         steps = ["on", "cast"] if args.cmd == "on" else [args.cmd]
@@ -1609,7 +2077,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 log("ERROR: %s" % exc)
                             sys.stderr.write("ERROR: %s\n" % exc)
                             break
-                        if step != "status":
+                        if step not in ("status", "info"):
                             log("%s: manual %s sent" % (name, step))
                             print("%s: %s sent" % (name, step))
             except StateError as exc:  # this TV's lock file cannot be opened: skip it, go on to the next

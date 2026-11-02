@@ -46,15 +46,36 @@ python3 scripts/kids-tv.py on --tv girls-room             # manual: power on, th
 python3 scripts/kids-tv.py cast --tv girls-room           # manual: cast only
 python3 scripts/kids-tv.py off --tv girls-room            # manual: power off
 python3 scripts/kids-tv.py status                    # read each TV's power state
+python3 scripts/kids-tv.py info --tv girls-room           # manual: which cast app is running
+python3 scripts/kids-tv.py stop --tv girls-room           # manual: stop the cast
+python3 scripts/kids-tv.py castcheck --tv all             # manual: cast, read the app, stop (no power)
+python3 scripts/kids-tv.py netcheck                       # open each TV and Sonos port once
+python3 scripts/kids-tv.py alerts                         # list alerts not yet acknowledged
 ```
+
+### Casting
+
+The script casts by itself, with only the Python standard library, so it runs under `/usr/bin/python3` (3.9) from launchd. It opens TLS to the Chromecast's port 8009 and speaks the Cast protocol: length-prefixed protobuf `CastMessage`s, encoded by hand, answering the receiver's heartbeat. `cast` launches DashCast (app `84912283`, the app `catt cast_site` uses), connects to the app, sends it the board URL, then reads the receiver status and needs DashCast running. `info` reads the receiver status; the stop quits the running app.
+
+A receiver status the script cannot read (empty, or an app with no id) is "unknown", never idle: the stop is sent anyway, without a session. The same holds with catt, whose `catt info -j` prints `{}` when it cannot reach the device.
+
+`catt` is used only if you ask for it: set `KIDS_TV_CATT` (or `--catt`) to its path, for example `~/Tools/catt-venv/bin/catt`. Under launchd a catt in its own Python may be blocked by macOS Local Network privacy (it then finds no device), which is why casting no longer needs it.
 
 Only one command acts on a TV at a time: each TV has a lock file, `kids-tv-<key>.lock`, beside the state file (`fcntl.flock`). `tick` skips a TV another command holds, with a log line, and tries again next minute. A manual command waits up to 120 seconds, then logs an `ERROR:` and exits 1. With `--tv all`, a TV that fails (unreachable, busy, or an off that does not stick) is logged and the next TV is still done; the command exits 1 if any TV failed.
 
 LaunchAgent `launchd/com.davidcasas.morningboard.kids-tv.plist` runs `tick` once a minute and at login. `tick` reads the schedule and a small state file; it sends to a TV only when a step is due: one power-on and cast per TV after alarm, one power-off per TV after on-the-road. The state file (`~/Library/Application Support/morning-board/kids-tv-state.json`) keeps a reboot or a second tick from repeating a step. It reads a TV's power state only for 90 seconds after a power-off, so a kid who switches away is left alone. A power-on 15 minutes or more after alarm is skipped for the day and logged, and a power-off 20 minutes or more after on-the-road is skipped. Each step is written to the state file before it is sent; if the state file cannot be written, or is damaged, nothing is sent that day and an `ERROR:` is logged once for the day (not every minute; the marker is `kids-tv-error-day.json` beside the log). A failed step is retried on later ticks, up to four times, then logged and dropped for the day.
 
-Alerts go to `~/Library/Application Support/morning-board/kids-tv-alert.json` (override with `KIDS_TV_ALERT` or `--alert`), outside the repo, with an `ALERT:` line in the log. One is written at once for the first failed power-on of the day (after the 4-minute restart window for a TV that does not answer), an off that does not stick, and the Sonos failures below; at most one per TV, step and date. The file is `{"alerts": [{"date", "tv", "step", "error", "at"}, ...]}`, newest last, the newest 60 kept, replaced atomically. `step` is `on`, `off`, `sonos` or `sonos-sync`.
+Alerts go to `~/Library/Application Support/morning-board/kids-tv-alert.json` (override with `KIDS_TV_ALERT` or `--alert`), outside the repo, with an `ALERT:` line in the log. One is written at once for the first failed power-on of the day (after the 4-minute restart window for a TV that does not answer), an off that does not stick, and the Sonos failures below; at most one per TV, step and date. A cast that fails writes one alert on its first try (`cast`) and one more when its tries run out (`cast-final`). The file is `{"alerts": [{"date", "tv", "step", "error", "at"}, ...]}`, newest last, the newest 60 kept, replaced atomically. `step` is `on`, `off`, `cast`, `cast-final`, `netcheck`, `sonos` or `sonos-sync`; `tv` is a TV key, a Sonos room key, or `all`.
 
-Each TV's address and token live in an env file in `~/.config/vizio/` (`<PREFIX>IP` and `<PREFIX>TOKEN`). The repo only knows the neutral keys `boys-room` and `girls-room`, whose defaults are `boys-room.env` with prefix `VIZIO_BOYS_ROOM_` and `girls-room.env` with prefix `VIZIO_GIRLS_ROOM_`. To map a key to a different file, put `{"tvs": {"boys-room": {"env_file": "x.env", "prefix": "VIZIO_X_"}}}` in the mini-local `~/.config/kids-tv/config.json`, which is not in git and holds no tokens. They are read inside the script and never logged. Casting uses the `catt` binary at `~/Tools/catt-venv/bin/catt` (override with `KIDS_TV_CATT`). The log is `~/Library/Logs/kids-tv-morning-board.log`.
+`alerts` lists the alerts not yet acknowledged, each with an id `date/tv/step` (`--json` for JSON, `--all` to include acknowledged ones). `alerts --ack ID ...` or `alerts --ack-all` marks them read in `kids-tv-alert-ack.json` beside the alert file. The job never reads that file and `alerts` never writes the alert file, so a reader and the job do not write the same file.
+
+### Network check
+
+`netcheck` opens one TCP connection, then closes it, to each port the job uses: each TV's Cast port 8009, its Cast info port 8008 and SmartCast 7345, and each Sonos room's 1400. It sends nothing on them. A port that does not answer is retried for `--settle` seconds (default 0). It logs one line with each result: ok, refused, timed out, no route (`EHOSTUNREACH`), network unreachable or host down. If every connection fails at once with no route to host, it writes one alert, tv `all`, step `netcheck`, starting `Local Network permission blocked`: macOS fails a process that lacks the Local Network permission that way at once. Otherwise each TV or room with a failing port gets its own `netcheck` alert. It exits 1 if anything failed.
+
+`launchd/com.davidcasas.morningboard.kids-tv-netcheck.plist` runs `netcheck --settle 180` at each login, so after the weekly restart. Its program is `/usr/bin/python3` itself, as for the kids-tv job, so it tests the same permission. `launchd/com.davidcasas.morningboard.kids-tv-castcheck.plist` is a hand-run test that casts each TV from launchd, reads the app and stops it; it has no schedule.
+
+Each TV's address and token live in an env file in `~/.config/vizio/` (`<PREFIX>IP` and `<PREFIX>TOKEN`). The repo only knows the neutral keys `boys-room` and `girls-room`, whose defaults are `boys-room.env` with prefix `VIZIO_BOYS_ROOM_` and `girls-room.env` with prefix `VIZIO_GIRLS_ROOM_`. To map a key to a different file, put `{"tvs": {"boys-room": {"env_file": "x.env", "prefix": "VIZIO_X_"}}}` in the mini-local `~/.config/kids-tv/config.json`, which is not in git and holds no tokens. They are read inside the script and never logged. The log is `~/Library/Logs/kids-tv-morning-board.log`.
 
 ### Calendar run days
 
