@@ -613,6 +613,13 @@ class CastChannel:
         raw = socket.create_connection((host, port or CAST_PORT), timeout=timeout)
         try:
             self._sock = ctx.wrap_socket(raw, do_handshake_on_connect=False)
+            # 3.10–3.12 turn a TCP reset into an SSLEOFError, and the default
+            # suppress_ragged_eofs then makes recv return b"" — the same as a
+            # close. _read tells them apart only if that error is raised.
+            # 3.9 and 3.13 already raise ConnectionResetError for a reset, so
+            # the socket flag stays at its default and their reads do not change.
+            if (3, 10) <= sys.version_info[:2] < (3, 13):
+                self._sock.suppress_ragged_eofs = False
         except BaseException:
             raw.close()
             raise
@@ -668,7 +675,18 @@ class CastChannel:
             if left <= 0:
                 raise socket.timeout("timed out")
             self._sock.settimeout(left)
-            chunk = self._sock.recv(65536)
+            try:
+                chunk = self._sock.recv(65536)
+            except ssl.SSLEOFError as exc:
+                # Reached on 3.10–3.12, where ragged EOFs are not suppressed.
+                # A close that skips close_notify is UNEXPECTED_EOF_WHILE_READING
+                # and stays "the receiver closed the connection", as before.
+                # A reset has no OpenSSL reason; raise the ConnectionResetError
+                # that 3.9 and 3.13 already raise from recv itself.
+                if getattr(exc, "reason", None) == "UNEXPECTED_EOF_WHILE_READING":
+                    chunk = b""
+                else:
+                    raise ConnectionResetError(errno.ECONNRESET, os.strerror(errno.ECONNRESET))
             if not chunk:
                 raise ConnectionError("the receiver closed the connection")
             self._buffer += chunk
