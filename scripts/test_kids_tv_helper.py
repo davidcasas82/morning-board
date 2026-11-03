@@ -275,6 +275,21 @@ class BuiltHelperTests(unittest.TestCase):
                 self.assertNotEqual(done.returncode, 0)
                 self.assertFalse(out.exists())
 
+    def test_build_refuses_a_quote_backslash_or_newline_in_a_directory_name(self):
+        # Each path is a real file that matches /*/kids-tv.py, so only the quote guard can refuse it;
+        # without the guard the characters would reach clang's -DKIDS_TV_SCRIPT="..." define.
+        for name in ('a"b', "a\\b", "a\nb"):
+            with self.subTest(name):
+                script = Path(self.tmp.name, name, "kids-tv.py")
+                script.parent.mkdir()
+                script.write_text("print('hi')\n")
+                out = Path(self.tmp.name, "refused-quote")
+                done = subprocess.run([str(BUILD), str(script), str(out)], capture_output=True, text=True, timeout=60)
+                self.assertEqual(done.returncode, 64, done.stderr)
+                self.assertEqual(done.stderr.strip(),
+                                 "build-kids-tv-helper: the script path may not contain quotes, backslashes or newlines")
+                self.assertFalse(out.exists())
+
     def test_python_environment_variables_are_removed(self):
         script = self.fake_script("import os\nprint(sorted(k for k in os.environ if k.startswith('PYTHON')))\n"
                                   "print(os.environ.get('KEEP_ME'))\n")
@@ -301,14 +316,28 @@ class BuiltHelperTests(unittest.TestCase):
     def test_a_signal_while_the_child_is_spawned_is_passed_on(self):
         # A test build of the same source raises SIGTERM after blocking it, just before posix_spawn: the
         # signal must stay pending and reach the child once its pid is known, not be dropped.
-        exe = Path(self.tmp.name, "spawn-window-helper")
-        subprocess.run(["clang", "-Os", "-Wall", "-Wextra", "-Werror", '-DKIDS_TV_SCRIPT="%s"' % self.script,
-                        "-DKIDS_TV_TEST_SIGNAL_IN_SPAWN_WINDOW=SIGTERM", "-o", str(exe),
-                        str(ROOT / "helper" / "kids-tv-helper.c")], check=True, capture_output=True, timeout=120)
+        exe = self.hook_build("spawn-window-helper", "-DKIDS_TV_TEST_SIGNAL_IN_SPAWN_WINDOW=SIGTERM")
         script = self.fake_script("import time\ntime.sleep(5)\nprint('not stopped')\n")
         done = subprocess.run([str(exe), script], capture_output=True, text=True, timeout=20)
         self.assertEqual(done.returncode, 128 + signal.SIGTERM, done.stdout + done.stderr)
         self.assertEqual(done.stdout, "")
+
+    def test_a_signal_before_the_handlers_are_installed_is_passed_on(self):
+        # A test build raises SIGTERM just before the sigaction calls. Blocked by then, it is held, then
+        # forwarded once the child's pid is known: the helper exits 143 for its child. Were the handlers
+        # installed before blocking, it would kill the helper itself (returncode -15) with no child started.
+        exe = self.hook_build("before-handlers-helper", "-DKIDS_TV_TEST_SIGNAL_BEFORE_HANDLERS=SIGTERM")
+        script = self.fake_script("import time\ntime.sleep(5)\nprint('not stopped')\n")
+        done = subprocess.run([str(exe), script], capture_output=True, text=True, timeout=20)
+        self.assertEqual(done.returncode, 128 + signal.SIGTERM, done.stdout + done.stderr)
+        self.assertEqual(done.stdout, "")
+
+    def hook_build(self, name: str, define: str) -> Path:
+        exe = Path(self.tmp.name, name)
+        subprocess.run(["clang", "-Os", "-Wall", "-Wextra", "-Werror", '-DKIDS_TV_SCRIPT="%s"' % self.script,
+                        define, "-o", str(exe), str(ROOT / "helper" / "kids-tv-helper.c")],
+                       check=True, capture_output=True, timeout=120)
+        return exe
 
 
 if __name__ == "__main__":
