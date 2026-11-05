@@ -30,6 +30,14 @@ A missing times file uses schedule.json. See README,
     kids-tv.py times show                          print resolved times for the next 7 days
     kids-tv.py times set friday --alarm 06:30 --leave 07:40
     kids-tv.py times set 2026-11-13 --alarm 07:00 --leave 08:10
+    kids-tv.py healthcheck [--slot SLOT]           read-only check; sends nothing to a TV or speaker
+
+healthcheck decides the morning from resolved_day_times(schedule, day): the on
+check is due a few minutes after alarm, the off check at leaveBy plus
+OFF_GRACE, each once a day. A times file that exists but will not parse is not
+a run day (the alert is already sent); it is not a failure on later runs. The
+evening check is the 8:45 PM run (--slot evening). It reads logs and state
+only. It never sends a command to a TV or a speaker.
 
 tick sends nothing to a TV outside the window: one power-on and cast per TV
 after alarm, one power-off per TV after on-the-road. Each is recorded in a
@@ -67,14 +75,17 @@ import contextlib
 import datetime as dt
 import errno
 import fcntl
+import hashlib
 import http.client
 import ipaddress
 import json
 import os
+import plistlib
 import re
 import select
 import socket
 import ssl
+import stat
 import struct
 import subprocess
 import sys
@@ -119,6 +130,10 @@ run_days_path_from_config: Optional[str] = None  # set from the local config by 
 MAX_ATTEMPTS = 4  # per TV, per step, per day
 ON_GRACE = dt.timedelta(minutes=15)  # a power-on this long or longer after alarm is skipped
 OFF_GRACE = dt.timedelta(minutes=20)  # a power-off this long or longer after on-the-road is skipped
+# The on check is due this long after alarm. Power-on retries run for about
+# four minutes and cast retries until about seven, so the check waits until
+# both have finished. Not a clock time; the day's alarm comes from resolved_day_times.
+ON_CHECK_AFTER = dt.timedelta(minutes=10)
 CAST_SETTLE_SECONDS = 4
 CAST_TRIES = 6
 CAST_RETRY_SECONDS = 3
@@ -2292,6 +2307,9 @@ def netcheck(targets: List[tuple], alert_path, log: Callable, now: dt.datetime, 
     log("netcheck: " + ", ".join("%s %s" % (k[0], text[k]) for k in results))
     failing = [k for k, r in results.items() if r != "ok"]
     if not failing:
+        # The healthcheck looks for this line. It is written only when every
+        # expected target is ok. Without Sonos that is 6 (2 TVs x 3 ports).
+        log("%d targets ok" % len(results))
         return 0
     probed = [r for k, r in results.items() if k in ports]
     if probed and all(r == "no route" for r in probed):
@@ -2303,6 +2321,632 @@ def netcheck(targets: List[tuple], alert_path, log: Callable, now: dt.datetime, 
         write_alert(alert_path, now.date(), key, "netcheck",
                     "unreachable: " + ", ".join(text[k] for k in failing if k[0] == key), now, log)
     return len(failing)
+
+
+# ------------------------------------------------------------------ healthcheck
+#
+# A local stand-in for the old alert-check routine. It reads logs, state, the
+# run-days file, and the kids-tv job plist. It never opens a TV or a speaker,
+# and it never reads ~/.config/vizio. Morning slots are due from
+# resolved_day_times: on at alarm + ON_CHECK_AFTER, off at leaveBy + OFF_GRACE,
+# each once per day. Evening is a separate 20:45 run.
+
+HEALTH_PROBLEM_WINDOW = dt.timedelta(hours=2)
+HEALTH_EVENING = dt.time(20, 45)
+HELPER_EXE = "Applications/MorningBoardTVHelper.app/Contents/MacOS/kids-tv-helper"
+_TARGETS_OK = re.compile(r"^[1-9]\d* targets ok$")
+HEALTH_SLOTS = ("morning-on", "morning-off", "evening")
+BROKEN_TIMES_REASON = "not a run day, alert already sent"
+_LOG_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) (.*)$")
+_SYNC_LINE = re.compile(r"^(\S+): sonos alarm for (\d{4}-\d{2}-\d{2}): (.+)$")
+_TV_PHRASE = {"on": "power on sent", "cast": "cast sent", "off": "power off sent"}
+_TV_STATE_KEY = {"on": "power_on_done", "cast": "cast_done", "off": "off_done"}
+
+
+def read_stamp_lines(path, zone) -> Optional[List[tuple]]:
+    """(aware stamp, message, raw line) for each timestamped line, or None if the file is missing."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    rows = []
+    for raw in text.splitlines():
+        match = _LOG_LINE.match(raw)
+        if not match:
+            continue
+        stamp = dt.datetime.strptime(match.group(1) + " " + match.group(2), "%Y-%m-%d %H:%M:%S")
+        rows.append((stamp.replace(tzinfo=zone), match.group(3), raw))
+    return rows
+
+
+def _problem_line(message: str) -> bool:
+    lowered = message.lower()
+    return ("alert:" in lowered or "error" in lowered or "no route to host" in lowered
+            or "local network" in lowered)
+
+
+def _failure_recovered(message: str, later) -> bool:
+    """A retry line is not a failure once that TV's step has succeeded.
+
+    The job logs URLError and "No route to host" while it is still trying.
+    The final "power on sent" or "cast sent" line is the result.
+    """
+    match = re.match(r"ALERT: ([^:]+): ([a-z-]+):", message)
+    if not (match and match.group(1) in TVS and match.group(2) in SENT_TEXT):
+        match = re.match(r"([^:]+): (on|cast|off) failed\b", message)
+        if not (match and match.group(1) in TVS):
+            return False
+    phrase = "%s: %s" % (match.group(1), SENT_TEXT[match.group(2)])
+    return any(row[1] == phrase for row in later)
+
+
+def _times_alert_line(message: str) -> bool:
+    """The one alert resolved_day_times already sent for a broken times file."""
+    lowered = message.lower()
+    return "times override file" in lowered or lowered.startswith("alert: schedule:")
+
+
+def netcheck_line_ok(message: str) -> bool:
+    """True when every expected target is ok, whatever that count is.
+
+    The helper logs "N targets ok" only when none of the targets it probed failed.
+    N is 6 without Sonos and 8 with the two rooms. A detail line is ok when every
+    listed target ends in ok.
+    """
+    text = message.strip()
+    if _TARGETS_OK.fullmatch(text):
+        return True
+    if not text.startswith("netcheck:"):
+        return False
+    parts = [part.strip() for part in text[len("netcheck:"):].split(",") if part.strip()]
+    return bool(parts) and all(part.endswith(" ok") for part in parts)
+
+
+def load_ran_slots(path, day: dt.date) -> List[str]:
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict) or data.get("date") != day.isoformat() or not isinstance(data.get("slots"), list):
+        return []
+    return [slot for slot in data["slots"] if slot in HEALTH_SLOTS]
+
+
+def save_ran_slots(path, day: dt.date, slots: List[str]) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    payload = {"date": day.isoformat(), "slots": [slot for slot in HEALTH_SLOTS if slot in set(slots)]}
+    tmp.write_text(json.dumps(payload, indent=1) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def times_file_broken(schedule: dict, day: dt.date, now: dt.datetime) -> bool:
+    """True when times.json exists but resolved_day_times refuses it.
+
+    The refusal already recorded one alert. Calling this again does not add another.
+    """
+    try:
+        resolved_day_times(schedule, day, now=now)
+    except TimesError:
+        return True
+    return False
+
+
+def morning_slots_due(now: dt.datetime, schedule: dict, ran_slots: List[str]) -> List[str]:
+    """Morning checks due now and not already run today. Evening is not decided here.
+
+    On is due at alarm + ON_CHECK_AFTER. Off is due at leaveBy + OFF_GRACE.
+    Times come from resolved_day_times(schedule, day). Saturday and Sunday stay
+    off. A broken times file is not a run day. A day that is not a run day has
+    nothing due. A run-days error is not a due check: the TVs would have stayed
+    off, and the evening run flags the error line.
+    """
+    day = now.date()
+    if day.weekday() >= 5:
+        return []
+    try:
+        times = resolved_day_times(schedule, day, now=now)
+    except TimesError:
+        return []
+    if not times:
+        return []
+    try:
+        runs = is_run_day(schedule, day, now=now)
+    except (RunDaysError, ScheduleError):
+        return []
+    if not runs:
+        return []
+    due = []
+    on_at = dt.datetime.combine(day, times["alarm"], tzinfo=now.tzinfo) + ON_CHECK_AFTER
+    off_at = dt.datetime.combine(day, times["leaveBy"], tzinfo=now.tzinfo) + OFF_GRACE
+    if now >= on_at and "morning-on" not in ran_slots:
+        due.append("morning-on")
+    if now >= off_at and "morning-off" not in ran_slots:
+        due.append("morning-off")
+    return due
+
+
+def _json_object(path):
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _not_before_ok(stamp: dt.datetime, not_before: Optional[dt.datetime]) -> bool:
+    """True when a stamp is at or after the alarm. No alarm bound means any stamp."""
+    if not_before is None:
+        return True
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=not_before.tzinfo)
+    return stamp >= not_before
+
+
+def _tv_evidence(lines, state, day: dt.date, name: str, step: str, not_before: Optional[dt.datetime] = None):
+    phrase = _TV_PHRASE[step]
+    if lines:
+        for stamp, message, raw in lines:
+            if not _not_before_ok(stamp, not_before):
+                continue
+            if stamp.date() == day and message == "%s: %s" % (name, phrase):
+                return raw
+    if state and state.get("date") == day.isoformat():
+        tvs = state.get("tvs") if isinstance(state.get("tvs"), dict) else {}
+        value = (tvs.get(name) or {}).get(_TV_STATE_KEY[step]) if isinstance(tvs.get(name), dict) else None
+        if isinstance(value, str) and value not in ("", "unknown"):
+            if not_before is not None:
+                try:
+                    done = dt.datetime.fromisoformat(value)
+                except ValueError:
+                    return None
+                if not _not_before_ok(done, not_before):
+                    return None
+            return "state: %s %s %s" % (name, _TV_STATE_KEY[step], value)
+    return None
+
+
+def _sonos_morning_evidence(lines, sonos_state, day: dt.date, key: str, not_before: Optional[dt.datetime] = None):
+    if lines:
+        for stamp, message, raw in lines:
+            if stamp.date() != day or not _not_before_ok(stamp, not_before):
+                continue
+            if message == "%s: sonos playing after alarm" % key:
+                return raw
+            if message.startswith("ALERT: %s:" % key) and "; Play sent" in message:
+                return raw
+    if sonos_state and sonos_state.get("date") == day.isoformat():
+        entry = (sonos_state.get("check") or {}).get(key) if isinstance(sonos_state.get("check"), dict) else None
+        if isinstance(entry, dict) and ("ok" in entry or "play_sent" in entry):
+            which = "ok" if "ok" in entry else "play_sent"
+            if not_before is not None:
+                raw_when = entry.get(which)
+                try:
+                    done = dt.datetime.fromisoformat(raw_when) if isinstance(raw_when, str) else None
+                except ValueError:
+                    done = None
+                if done is None or not _not_before_ok(done, not_before):
+                    return None
+            return "state: %s check %s" % (key, which)
+    return None
+
+
+def _sync_result(lines, sonos_state, day: dt.date, tomorrow: dt.date, key: str):
+    found = None
+    if lines:
+        for stamp, message, raw in lines:
+            if stamp.date() != day:
+                continue
+            match = _SYNC_LINE.match(message)
+            if match and match.group(1) == key and match.group(2) == tomorrow.isoformat():
+                found = (match.group(3), raw)
+    if found:
+        return found
+    if sonos_state and sonos_state.get("date") == day.isoformat():
+        sync = sonos_state.get("sync") if isinstance(sonos_state.get("sync"), dict) else {}
+        entry = sync.get(key) if isinstance(sync.get(key), dict) else {}
+        if entry.get("done") and isinstance(entry.get("result"), str):
+            return entry["result"], "state: %s sync %s" % (key, entry["result"])
+    return None, None
+
+
+def _sync_matches(result: str, alarm_time: Optional[dt.time], day: dt.date) -> bool:
+    if alarm_time is None:
+        text = result.split("re-read:")[-1].strip() if "re-read:" in result else result
+        if text.startswith("already "):
+            text = text[len("already "):]
+        return text == "off" or result.startswith("no alarm, so nothing to turn off")
+    phrase = "on %s ON_%s" % (alarm_time.strftime("%H:%M"), sonos_day(day))
+    final = result.split("re-read:")[-1] if "re-read:" in result else result
+    return phrase in final
+
+
+def _unacked_alerts(alert_path):
+    alerts = read_alerts(alert_path)
+    try:
+        acked = json.loads(alert_ack_path(alert_path).read_text(encoding="utf-8")).get("acked", {})
+    except (OSError, ValueError, AttributeError):
+        acked = {}
+    if not isinstance(acked, dict):
+        acked = {}
+    return [item for item in alerts if alert_id(item) not in acked]
+
+
+def _boot_time(override, zone):
+    if override:
+        stamp = dt.datetime.fromisoformat(override)
+        return stamp if stamp.tzinfo else stamp.replace(tzinfo=zone)
+    try:
+        out = subprocess.check_output(["/usr/sbin/sysctl", "-n", "kern.boottime"], text=True, timeout=2)
+        match = re.search(r"sec = (\d+)", out)
+        if match:
+            return dt.datetime.fromtimestamp(int(match.group(1)), tz=zone)
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        pass
+    try:
+        for line in Path("/proc/stat").read_text(encoding="utf-8").splitlines():
+            if line.startswith("btime "):
+                return dt.datetime.fromtimestamp(int(line.split()[1]), tz=zone)
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _common_findings(now, zone, args, ignore_times_alert: bool = False) -> tuple:
+    """Findings that apply to every check that actually runs. (problems, evidence).
+
+    No check requires the log to have been written in the last few minutes.
+    The job writes only when it acts. The on check looks for today's power-on,
+    cast, and Sonos lines from after the alarm.
+    """
+    problems, evidence = [], []
+    lines = read_stamp_lines(args.log, zone)
+    if not lines:
+        problems.append("the morning-board log has not been written")
+    else:
+        flagged = 0
+        for index, (stamp, message, raw) in enumerate(lines):
+            if ignore_times_alert and _times_alert_line(message):
+                continue
+            if stamp < now - HEALTH_PROBLEM_WINDOW or stamp > now or not _problem_line(message):
+                continue
+            if _failure_recovered(message, lines[index + 1:]):
+                continue
+            flagged += 1
+            if flagged <= 20:
+                problems.append(message)
+                evidence.append(raw)
+        if flagged > 20:
+            problems.append("%d more matching log lines in the last 2 hours" % (flagged - 20))
+    boot = _boot_time(args.boot, zone)
+    net_lines = read_stamp_lines(args.netcheck_log, zone)
+    if boot is None:
+        problems.append("the last boot time could not be read, so the helper netcheck was not judged")
+    else:
+        after = [row for row in (net_lines or []) if row[0] >= boot]
+        if not after:
+            problems.append("no helper netcheck line since the last boot")
+        elif not netcheck_line_ok(after[-1][1]):
+            problems.append("the latest helper netcheck line since boot does not say every target is ok")
+            evidence.append(redact_ips(after[-1][2]))
+        else:
+            evidence.append(after[-1][2])
+    expected = str(HOME / HELPER_EXE)
+    try:
+        job = plistlib.loads(Path(args.job_plist).read_bytes())
+        arguments = job.get("ProgramArguments") if isinstance(job, dict) else None
+        got = arguments[0] if isinstance(arguments, list) and arguments else ""
+    except (OSError, ValueError, plistlib.InvalidFileException, TypeError):
+        got = ""
+        problems.append("the kids-tv job plist could not be read")
+    if got and got != expected:
+        problems.append("the kids-tv job ProgramArguments start with %s, not %s" % (got, expected))
+        evidence.append("ProgramArguments[0] = " + got)
+    elif got == expected:
+        evidence.append("ProgramArguments[0] = " + got)
+    return problems, evidence
+
+
+def _morning_run(schedule, day, now) -> Optional[bool]:
+    """True, False, or None when the run-days file cannot be trusted."""
+    try:
+        return is_run_day(schedule, day, now=now)
+    except (RunDaysError, ScheduleError):
+        return None
+
+
+def _evaluate_slot(slot: str, now, schedule, lines, state, sonos_state, broken: bool = False) -> tuple:
+    """(problems, evidence, plain reason) for one slot. Shared findings are added by the caller."""
+    day = now.date()
+    problems, evidence = [], []
+    if slot in ("morning-on", "morning-off"):
+        if broken:
+            return [], [BROKEN_TIMES_REASON], BROKEN_TIMES_REASON
+        runs = _morning_run(schedule, day, now)
+        if runs is None:
+            problems.append("today's run day could not be read, so the morning was not confirmed")
+            return problems, evidence, ""
+        if not runs:
+            evidence.append("%s is not a run day, so the TVs stay off" % day.isoformat())
+            return problems, evidence, "Today is not a run day, so the TVs were not expected on."
+        alarm_at = None
+        if slot == "morning-on":
+            try:
+                times = resolved_day_times(schedule, day, now=now)
+            except TimesError:
+                times = None
+            if times:
+                alarm_at = dt.datetime.combine(day, times["alarm"], tzinfo=now.tzinfo)
+        for name in TVS:
+            if slot == "morning-on":
+                turned_on = _tv_evidence(lines, state, day, name, "on", alarm_at)
+                cast = _tv_evidence(lines, state, day, name, "cast", alarm_at)
+                if not turned_on:
+                    problems.append("%s did not turn on" % name)
+                else:
+                    evidence.append(turned_on)
+                if not cast:
+                    problems.append("%s did not cast" % name)
+                else:
+                    evidence.append(cast)
+            else:
+                turned_off = _tv_evidence(lines, state, day, name, "off")
+                if not turned_off:
+                    problems.append("%s did not go off" % name)
+                else:
+                    evidence.append(turned_off)
+        if slot == "morning-off":
+            return problems, evidence, "" if problems else "Both TVs went off."
+        if sonos_config:
+            missing = [key for key in TVS if key not in sonos_config["rooms"]]
+            if missing:
+                problems.append("Sonos config has no " + ", ".join(missing))
+            for key in sonos_config["rooms"]:
+                found = _sonos_morning_evidence(lines, sonos_state, day, key, alarm_at)
+                if not found:
+                    problems.append("%s alarm did not fire and Play was not sent" % key)
+                else:
+                    evidence.append(found)
+            if problems:
+                return problems, evidence, ""
+            names = " and ".join(sonos_config["rooms"])
+            return problems, evidence, "Both TVs turned on and cast, and %s fired or were sent Play." % names
+        evidence.append("Sonos is off, so the alarms were not checked.")
+        return problems, evidence, "" if problems else "Both TVs turned on and cast."
+    tomorrow = day + dt.timedelta(days=1)
+    try:
+        tomorrow_runs = is_run_day(schedule, tomorrow, now=now)
+        tomorrow_error = None
+    except (RunDaysError, ScheduleError) as exc:
+        tomorrow_runs, tomorrow_error = None, str(exc)
+    if not sonos_config:
+        if broken:
+            evidence.append(BROKEN_TIMES_REASON)
+        elif tomorrow_error:
+            problems.append("Sonos is off and tomorrow could not be read: " + tomorrow_error)
+        elif tomorrow_runs:
+            problems.append("Sonos is off, so %s's alarms are not automated" % tomorrow.isoformat())
+        else:
+            evidence.append("Sonos is off and %s is not a run day" % tomorrow.isoformat())
+    else:
+        if tomorrow_error:
+            problems.append("could not tell whether %s runs: %s" % (tomorrow.isoformat(), tomorrow_error))
+            alarm_time = None
+        elif broken or not tomorrow_runs:
+            # A broken times file does not start tomorrow, and the evening sync turns the alarms off.
+            alarm_time = None
+        else:
+            try:
+                times = resolved_day_times(schedule, tomorrow, now=now)
+            except TimesError:
+                times = None
+            alarm_time = times["alarm"] if times else None
+            if alarm_time is None:
+                problems.append("%s is a run day but has no alarm time" % tomorrow.isoformat())
+        for key in sonos_config["rooms"]:
+            if tomorrow_error:
+                break
+            result, raw = _sync_result(lines, sonos_state, day, tomorrow, key)
+            if result is None:
+                problems.append("%s alarm was not synced tonight" % key)
+                continue
+            if not _sync_matches(result, alarm_time, tomorrow):
+                wanted = "off" if alarm_time is None else "on %s ON_%s" % (
+                    alarm_time.strftime("%H:%M"), sonos_day(tomorrow))
+                problems.append("%s alarm for %s is %s, wanted %s" % (key, tomorrow.isoformat(), result, wanted))
+            evidence.append(raw)
+    if not problems and broken:
+        reason = BROKEN_TIMES_REASON
+    elif not problems and sonos_config:
+        names = " and ".join(sonos_config["rooms"])
+        reason = "Tonight's sync set %s for %s." % (names, tomorrow.isoformat())
+    elif not problems:
+        reason = "Evening check found nothing to flag."
+    else:
+        reason = ""
+    return problems, evidence, reason
+
+
+def _write_status(path, payload: dict) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _webhook_url(path):
+    """(url or None, error or None). A missing file is no webhook. A mode other than 0600 is not read."""
+    path = Path(path)
+    if not path.is_file():
+        return None, None
+    if stat.S_IMODE(path.stat().st_mode) != 0o600:
+        return None, "the webhook file is not chmod 600, so it was not read and nothing was sent"
+    url = None
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, _, value = line.partition("=")
+            if key.strip() in ("WEBHOOK_URL", "URL"):
+                url = value.strip().strip("\"'")
+        elif line.startswith("https://") or line.startswith("http://"):
+            url = line
+    return (url or None), None
+
+
+def _post_json(url: str, payload: dict) -> None:
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(request, timeout=10) as response:
+        response.read()
+
+
+def _healthcheck_run(args, log) -> int:
+    schedule = load_schedule(args.schedule or default_schedule_path())
+    zone = schedule_zone(schedule)
+    if args.now:
+        now = dt.datetime.fromisoformat(args.now)
+        now = now if now.tzinfo else now.replace(tzinfo=zone)
+    else:
+        now = dt.datetime.now(zone)
+    auto = not args.slot
+    ran_slots = load_ran_slots(args.ran, now.date()) if auto else []
+    # Evening matches the sync, which alerts for tomorrow. Morning alerts for today.
+    # One call per run, so a later tick does not add a second alert for the same morning.
+    probe = now.date() + dt.timedelta(days=1) if args.slot == "evening" else now.date()
+    broken = times_file_broken(schedule, probe, now)
+    if auto and broken:
+        # The interval job asks again every few minutes. The alert is already recorded.
+        # This pass does not POST and does not write another alert.
+        _write_status(args.status, {"at": now.isoformat(timespec="seconds"), "evidence": [],
+                                    "reason": BROKEN_TIMES_REASON, "result": "pass", "slot": "auto"})
+        print("healthcheck: " + BROKEN_TIMES_REASON)
+        return 0
+    if auto:
+        slots = morning_slots_due(now, schedule, ran_slots)
+        if not slots:
+            print("healthcheck: nothing due")
+            return 0
+    else:
+        slots = [args.slot]
+    lines = read_stamp_lines(args.log, zone)
+    state = _json_object(args.state)
+    sonos_state = _json_object(sonos_state_path(args))
+    alert_path = args.alert or default_alert_path()
+    problems, evidence = _common_findings(now, zone, args, ignore_times_alert=broken)
+    reasons = []
+    for slot in slots:
+        slot_problems, slot_evidence, reason = _evaluate_slot(
+            slot, now, schedule, lines, state, sonos_state, broken)
+        problems.extend(slot_problems)
+        evidence.extend(item for item in slot_evidence if item not in evidence)
+        if reason and not slot_problems:
+            reasons.append(reason)
+    alert_ids = []
+    try:
+        pending = _unacked_alerts(alert_path)
+    except StateError as exc:
+        problems.append(str(exc))
+        pending = []
+    for item in pending:
+        if broken and item.get("tv") == "schedule" and item.get("step") == "times":
+            continue
+        # A first-try alert for a step that later succeeded is not the result.
+        # Leave it in the alert file for the other check. Do not ack it here.
+        if item.get("tv") in TVS and item.get("step") in SENT_TEXT and _tv_evidence(
+                lines, state, now.date(), item["tv"], item["step"]):
+            continue
+        alert_ids.append(alert_id(item))
+        problems.append("unacknowledged alert %s: %s" % (alert_id(item), item.get("error")))
+    if broken and not problems:
+        reasons = [BROKEN_TIMES_REASON]
+    if auto:
+        save_ran_slots(args.ran, now.date(), ran_slots + slots)
+    result = "fail" if problems else "pass"
+    if problems:
+        reason = "Failed: " + "; ".join(problems)
+    elif reasons:
+        reason = " ".join(reasons)
+    else:
+        reason = "The check passed."
+    evidence = [redact_ips(str(item)) for item in evidence]
+    reason = redact_ips(reason)
+    slot_name = args.slot or "+".join(slots)
+    payload = {"at": now.isoformat(timespec="seconds"), "evidence": evidence, "reason": reason,
+               "result": result, "slot": slot_name}
+    if alert_ids:
+        payload["alert_ids"] = alert_ids
+    _write_status(args.status, payload)
+    print("healthcheck %s: %s" % (slot_name, result))
+    if result == "pass":
+        sent_path = Path(args.status).with_name(Path(args.status).stem + "-sent.json")
+        if sent_path.exists():
+            sent_path.unlink()
+        return 0
+    fingerprint = hashlib.sha256(json.dumps(
+        {"evidence": evidence, "reason": reason, "result": result, "slot": slot_name},
+        sort_keys=True).encode("utf-8")).hexdigest()
+    sent_path = Path(args.status).with_name(Path(args.status).stem + "-sent.json")
+    previous = _json_object(sent_path) or {}
+    if previous.get("fingerprint") == fingerprint:
+        return 1
+    url, webhook_error = _webhook_url(args.webhook)
+    if webhook_error:
+        payload["evidence"] = evidence + [webhook_error]
+        payload["reason"] = reason + "; " + webhook_error
+        _write_status(args.status, payload)
+        return 1
+    if not url:
+        return 1
+    try:
+        _post_json(url, {"evidence": evidence, "reason": reason, "result": result, "slot": slot_name,
+                         "alert_ids": alert_ids})
+    except Exception as exc:  # the URL is not included; delivery is retried next time
+        note = "the webhook was not sent: %s" % exc.__class__.__name__
+        payload["evidence"] = evidence + [note]
+        payload["reason"] = reason + "; " + note
+        _write_status(args.status, payload)
+        return 1
+    sent_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = sent_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"fingerprint": fingerprint, "at": payload["at"]}, indent=1) + "\n", encoding="utf-8")
+    os.replace(tmp, sent_path)
+    return 1
+
+
+def healthcheck_command(args, log) -> int:
+    """Run the healthcheck. Restores the path env vars it sets so a test does not leak them."""
+    keys = ("KIDS_TV_SCHEDULE", "KIDS_TV_TIMES", "KIDS_TV_ALERT", "KIDS_TV_RUN_DAYS")
+    saved = {key: os.environ.get(key) for key in keys}
+    try:
+        if args.schedule:
+            os.environ["KIDS_TV_SCHEDULE"] = args.schedule
+        if args.times:
+            os.environ["KIDS_TV_TIMES"] = args.times
+        if args.alert:
+            os.environ["KIDS_TV_ALERT"] = args.alert
+        if args.run_days:
+            os.environ["KIDS_TV_RUN_DAYS"] = args.run_days
+        try:
+            return _healthcheck_run(args, log)
+        except (ScheduleError, StateError, OSError, ValueError) as exc:
+            reason = "Failed: " + redact_ips(str(exc))
+            try:
+                _write_status(args.status, {"evidence": [], "reason": reason, "result": "fail",
+                                            "slot": args.slot or "auto"})
+            except OSError:
+                pass
+            print("healthcheck: fail")
+            return 1
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 # ----------------------------------------------------------------------- cli
@@ -2349,6 +2993,21 @@ def build_parser() -> argparse.ArgumentParser:
     set_cmd.add_argument("which", help="weekday name (friday) or YYYY-MM-DD")
     set_cmd.add_argument("--alarm", required=True, help="HH:MM")
     set_cmd.add_argument("--leave", required=True, help="HH:MM, after the alarm")
+    h = sub.add_parser("healthcheck", help="read-only check of the kids' TVs and the job; sends nothing")
+    h.add_argument("--slot", choices=HEALTH_SLOTS, default=None,
+                   help="run this check now; omit it and a morning check runs only when it is due")
+    h.add_argument("--now", help="ISO local time, for tests")
+    h.add_argument("--status", default=str(HOME / "Library" / "Application Support" / "morning-board"
+                                           / "kids-tv-healthcheck.json"))
+    h.add_argument("--ran", default=str(HOME / "Library" / "Application Support" / "morning-board"
+                                        / "kids-tv-healthcheck-ran.json"),
+                   help="which automatic checks already ran today")
+    h.add_argument("--webhook", default=str(HOME / ".config" / "kids-tv" / "alert-webhook.env"),
+                   help="chmod 600 file with WEBHOOK_URL; missing means write the status file only")
+    h.add_argument("--netcheck-log", default=str(HOME / "Library" / "Logs" / "kids-tv-helper-netcheck.log"))
+    h.add_argument("--job-plist", default=str(HOME / "Library" / "LaunchAgents"
+                                              / "com.davidcasas.morningboard.kids-tv.plist"))
+    h.add_argument("--boot", default=None, help="ISO time of the last boot, for tests")
     return p
 
 
@@ -2419,6 +3078,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 print(render_plan(day, plan))
             return 0
+        if args.cmd == "healthcheck":
+            return healthcheck_command(args, log)
         if args.cmd == "tick":
             schedule = load_schedule(schedule_path)
             zone = schedule_zone(schedule)

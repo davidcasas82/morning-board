@@ -51,6 +51,8 @@ python3 scripts/kids-tv.py stop --tv girls-room           # manual: stop the cas
 python3 scripts/kids-tv.py castcheck --tv all             # manual: cast, read the app, stop (no power)
 python3 scripts/kids-tv.py netcheck                       # open each TV and Sonos port once
 python3 scripts/kids-tv.py alerts                         # list alerts not yet acknowledged
+python3 scripts/kids-tv.py healthcheck                    # morning on/off checks, if one is due
+python3 scripts/kids-tv.py healthcheck --slot evening     # the 8:45 PM check
 ```
 
 ### Casting
@@ -65,11 +67,73 @@ Only one command acts on a TV at a time: each TV has a lock file, `kids-tv-<key>
 
 LaunchAgent `launchd/com.davidcasas.morningboard.kids-tv.plist` runs `tick` once a minute and at login, through `MorningBoardTVHelper.app` (see "Local Network helper app" below). `tick` reads the schedule and a small state file; it sends to a TV only when a step is due: one power-on and cast per TV after alarm, one power-off per TV after on-the-road. The state file (`~/Library/Application Support/morning-board/kids-tv-state.json`) keeps a reboot or a second tick from repeating a step. It reads a TV's power state only for 90 seconds after a power-off, so a kid who switches away is left alone. A power-on 15 minutes or more after alarm is skipped for the day and logged, and a power-off 20 minutes or more after on-the-road is skipped. Each step is written to the state file before it is sent; if the state file cannot be written, or is damaged, nothing is sent that day and an `ERROR:` is logged once for the day (not every minute; the marker is `kids-tv-error-day.json` beside the log). A failed step is retried on later ticks, up to four times, then logged and dropped for the day.
 
-Alerts go to `~/Library/Application Support/morning-board/kids-tv-alert.json` (override with `KIDS_TV_ALERT` or `--alert`), outside the repo, with an `ALERT:` line in the log. One is written at once for the first failed power-on of the day (after the 4-minute restart window for a TV that does not answer), an off that does not stick, and the Sonos failures below; at most one per TV, step and date. A cast that fails writes one alert on its first try (`cast`) and one more when its tries run out (`cast-final`). The file is `{"alerts": [{"date", "tv", "step", "error", "at"}, ...]}`, newest last, the newest 60 kept, replaced atomically. `step` is `on`, `off`, `cast`, `cast-final`, `netcheck`, `sonos` or `sonos-sync`; `tv` is a TV key, a Sonos room key, or `all`.
+Alerts go to `~/Library/Application Support/morning-board/kids-tv-alert.json` (override with `KIDS_TV_ALERT` or `--alert`), outside the repo, with an `ALERT:` line in the log. One is written at once for the first failed power-on of the day (after the 4-minute restart window for a TV that does not answer), an off that does not stick, and the Sonos failures below; at most one per TV, step and date. A cast that fails writes one alert on its first try (`cast`) and one more when its tries run out (`cast-final`). The file is `{"alerts": [{"date", "tv", "step", "error", "at"}, ...]}`, newest last, the newest 60 kept, replaced atomically. `step` is `on`, `off`, `cast`, `cast-final`, `netcheck`, `sonos`, `sonos-sync`, or `times`; `tv` is a TV key, a Sonos room key, or `all`.
 
 `alerts` lists the alerts not yet acknowledged, each with an id `date/tv/step` (`--json` for JSON, `--all` to include acknowledged ones). `alerts --ack ID ...` or `alerts --ack-all` marks them read in `kids-tv-alert-ack.json` beside the alert file. The job never reads that file and `alerts` never writes the alert file, so a reader and the job do not write the same file.
 
-The reader is an alert-check routine outside this repo: at 6:20 AM, 7:30 AM and 8:45 PM it runs `kids-tv.py alerts --json`, passes anything new on, then acknowledges it with `--ack`. Nothing in this repo sends a message.
+### Health check
+
+`healthcheck` is the local stand-in for the old outside alert check. It reads logs and state. It sends nothing to a TV or a speaker, and it never reads `~/.config/vizio`. With no `--slot`, it asks `resolved_day_times(schedule, day)` when an on or off check is due, and runs each one once per day (the marker is `kids-tv-healthcheck-ran.json` beside the status file). `--slot morning-on`, `morning-off`, or `evening` runs that check immediately, which is how the tests call it.
+
+That is the same `resolved_day_times` as the TV job (see "Local times"): a date wins over the weekday, which wins over `schedule.json`. A missing file is the schedule. A file that exists but will not parse raises `TimesError` after one alert, and the healthcheck treats that morning as not a run day. The reason is "not a run day, alert already sent". Later runs, including the 5-minute job and the evening job, do not POST and do not write that alert again. Saturday and Sunday are never a morning check.
+
+The on check is due at alarm plus 10 minutes (`ON_CHECK_AFTER`), after power-on retries (about four minutes) and cast retries (about seven). The off check is due at `leaveBy` plus `OFF_GRACE` (20 minutes). Those are not clock times. In `schedule.json`, Monday and Thursday are alarm `06:00` / leaveBy `07:10`, so the off check is due at 07:30. Friday is alarm `06:30` / leaveBy `07:40`, so the off check is due at 08:00. A check at 07:30 on Friday is not an off check.
+
+On a run day, the on check wants both TVs turned on and cast. If `config.json` has a `sonos` block, both kids' rooms must have fired or been sent Play. Text the check writes uses the room key, not the room name from the local config. The off check wants both TVs off. It runs only when today is a run day; otherwise it passes the TV part. The evening check is daily at 20:45. With Sonos, tonight's sync must have set both rooms for tomorrow: on at tomorrow's alarm when tomorrow is a run day, off when it is not. With Sonos off, a run-day tomorrow is flagged because the alarms are not automated. Every check that runs also flags unacknowledged alerts (`alerts --json`), except a first-try `on` or `cast` alert whose step later succeeded. The on check does not require a log line from the last 10 minutes. It passes when today's power-on, cast, and Sonos lines are from after the alarm, including a run at 06:14 or a late run at 06:45 after the mini wakes. The off check and the evening check do not use that clock either: the job writes only when it acts, so a clean off whose last line is the off itself (07:14 for a 07:30 check) and a clean evening whose last line is the 20:30 sync are not failures. A retry line (`error`, `URLError`, or `No route to host`) is not a failure when that step later succeeded. An `ALERT:`, `No route to host`, or `Local Network` line in the last 2 hours still fails when the step did not recover. Also flagged: a helper netcheck log whose latest line since boot does not say every expected target is ok (`N targets ok`; 6 without Sonos, 8 with it), and a `com.davidcasas.morningboard.kids-tv` job whose `ProgramArguments` does not start at `~/Applications/MorningBoardTVHelper.app/Contents/MacOS/kids-tv-helper`.
+
+It writes `~/Library/Application Support/morning-board/kids-tv-healthcheck.json`: `result` (`pass` or `fail`), a plain-English `reason`, and `evidence`. Exit status is non-zero on failure. If that result is a failure and `~/.config/kids-tv/alert-webhook.env` exists, is mode `0600`, and sets `WEBHOOK_URL`, the short JSON is POSTed once per distinct failure. The same failure is not sent again. That record is `kids-tv-healthcheck-sent.json` beside the status file. The check does not write `kids-tv-alert-ack.json`, so it does not mark alerts read for the other check. No webhook file means the status file only. Nothing here creates the webhook file.
+
+`launchd/com.davidcasas.morningboard.kids-tv-healthcheck.plist` runs `healthcheck` every 5 minutes (`StartInterval` 300) so a morning check runs on the first wake after it is due. `launchd/com.davidcasas.morningboard.kids-tv-healthcheck-evening.plist` runs `healthcheck --slot evening` at 20:45 every day. Neither is installed by cloning this repo. Install, as the mini account, only after a yes, and keep a backup of anything already there:
+
+```
+cd ~/code/morning-board
+uid=$(id -u); la="$HOME/Library/LaunchAgents"; p=com.davidcasas.morningboard
+stamp=$(date +%Y%m%d%H%M%S)
+mkdir -p "$la"
+for job in kids-tv-healthcheck kids-tv-healthcheck-evening; do
+  dst="$la/$p.$job.plist"
+  if [ -f "$dst" ]; then
+    cp -p "$dst" "$dst.bak-$stamp"
+  fi
+  launchctl bootout "gui/$uid/$p.$job" 2>/dev/null || true
+  sed -e "s|__REPO__|$HOME/code/morning-board|g" -e "s|__HOME__|$HOME|g" \
+    "launchd/$p.$job.plist" > "$dst"
+  launchctl bootstrap "gui/$uid" "$dst"
+done
+```
+
+Uninstall the same way: boot each job out, copy the installed plist to `$dst.bak-$stamp` if it is there, then remove it.
+
+```
+cd ~/code/morning-board
+uid=$(id -u); la="$HOME/Library/LaunchAgents"; p=com.davidcasas.morningboard
+stamp=$(date +%Y%m%d%H%M%S)
+for job in kids-tv-healthcheck kids-tv-healthcheck-evening; do
+  dst="$la/$p.$job.plist"
+  launchctl bootout "gui/$uid/$p.$job" 2>/dev/null || true
+  if [ -f "$dst" ]; then
+    cp -p "$dst" "$dst.bak-$stamp"
+    rm -f "$dst"
+  fi
+done
+```
+
+After `sed`, the installed files are exactly:
+
+- `~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv-healthcheck.plist`
+  - `Label` = `com.davidcasas.morningboard.kids-tv-healthcheck`
+  - `ProgramArguments` = `/usr/bin/python3`, `~/code/morning-board/scripts/kids-tv.py`, `healthcheck`
+  - `StartInterval` = `300`
+  - `StandardOutPath` = `~/Library/Logs/kids-tv-healthcheck.out`
+  - `StandardErrorPath` = `~/Library/Logs/kids-tv-healthcheck.err`
+- `~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv-healthcheck-evening.plist`
+  - `Label` = `com.davidcasas.morningboard.kids-tv-healthcheck-evening`
+  - `ProgramArguments` = `/usr/bin/python3`, `~/code/morning-board/scripts/kids-tv.py`, `healthcheck`, `--slot`, `evening`
+  - `StartCalendarInterval` / `Hour` = `20`, `Minute` = `45` (no `Weekday`, so every day)
+  - `StandardOutPath` = `~/Library/Logs/kids-tv-healthcheck-evening.out`
+  - `StandardErrorPath` = `~/Library/Logs/kids-tv-healthcheck-evening.err`
+
+If one of those plists was already installed, the installer also writes `….plist.bak-YYYYMMDDHHMMSS` next to it, a copy of the previous file. It does not edit the kids-tv job plist, `times.json`, or `alert-webhook.env`.
 
 ### Network check
 
