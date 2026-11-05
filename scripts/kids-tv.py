@@ -2306,7 +2306,8 @@ def netcheck(targets: List[tuple], alert_path, log: Callable, now: dt.datetime, 
     log("netcheck: " + ", ".join("%s %s" % (k[0], text[k]) for k in results))
     failing = [k for k, r in results.items() if r != "ok"]
     if not failing:
-        # The healthcheck looks for this line. 2 TVs x 3 ports + 2 Sonos rooms = 8.
+        # The healthcheck looks for this line. It is written only when every
+        # expected target is ok. Without Sonos that is 6 (2 TVs x 3 ports).
         log("%d targets ok" % len(results))
         return 0
     probed = [r for k, r in results.items() if k in ports]
@@ -2333,7 +2334,7 @@ HEALTH_LOG_FRESH = dt.timedelta(minutes=10)
 HEALTH_PROBLEM_WINDOW = dt.timedelta(hours=2)
 HEALTH_EVENING = dt.time(20, 45)
 HELPER_EXE = "Applications/MorningBoardTVHelper.app/Contents/MacOS/kids-tv-helper"
-NETCHECK_OK_LINE = "8 targets ok"
+_TARGETS_OK = re.compile(r"^[1-9]\d* targets ok$")
 HEALTH_SLOTS = ("morning-on", "morning-off", "evening")
 BROKEN_TIMES_REASON = "not a run day, alert already sent"
 _LOG_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) (.*)$")
@@ -2371,13 +2372,19 @@ def _times_alert_line(message: str) -> bool:
 
 
 def netcheck_line_ok(message: str) -> bool:
-    """True for the summary line, or for one detail line whose 8 targets all read ok."""
-    if message.strip() == NETCHECK_OK_LINE:
+    """True when every expected target is ok, whatever that count is.
+
+    The helper logs "N targets ok" only when none of the targets it probed failed.
+    N is 6 without Sonos and 8 with the two rooms. A detail line is ok when every
+    listed target ends in ok.
+    """
+    text = message.strip()
+    if _TARGETS_OK.fullmatch(text):
         return True
-    if not message.startswith("netcheck:"):
+    if not text.startswith("netcheck:"):
         return False
-    parts = [part.strip() for part in message[len("netcheck:"):].split(",") if part.strip()]
-    return len(parts) == 8 and all(part.endswith(" ok") for part in parts)
+    parts = [part.strip() for part in text[len("netcheck:"):].split(",") if part.strip()]
+    return bool(parts) and all(part.endswith(" ok") for part in parts)
 
 
 def load_ran_slots(path, day: dt.date) -> List[str]:
@@ -2578,7 +2585,7 @@ def _common_findings(now, zone, args, ignore_times_alert: bool = False) -> tuple
         if not after:
             problems.append("no helper netcheck line since the last boot")
         elif not netcheck_line_ok(after[-1][1]):
-            problems.append("the latest helper netcheck line since boot is not \"%s\"" % NETCHECK_OK_LINE)
+            problems.append("the latest helper netcheck line since boot does not say every target is ok")
             evidence.append(redact_ips(after[-1][2]))
         else:
             evidence.append(after[-1][2])

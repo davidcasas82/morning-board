@@ -3073,8 +3073,8 @@ class HealthcheckTests(unittest.TestCase):
         self.config.write_text(json.dumps({"sonos": {
             "backup": str(self.dir / "backup.json"),
             "rooms": {
-                "boys-room": {"room": "Daniel's Room", "ip": "10.9.8.7", "alarm_id": "11"},
-                "girls-room": {"room": "Girl's Room", "ip": "10.9.8.8", "alarm_id": "12"},
+                "boys-room": {"room": "Room One", "ip": "10.9.8.7", "alarm_id": "11"},
+                "girls-room": {"room": "Room Two", "ip": "10.9.8.8", "alarm_id": "12"},
             }}}))
 
     def invoke(self, slot, now, urlopen=None, extra=()):
@@ -3239,8 +3239,8 @@ class HealthcheckTests(unittest.TestCase):
                        "2026-10-29 06:19:01 girls-room: cast sent")
         rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00")
         self.assertEqual(status["result"], "pass")
-        self.assertIn("Daniel's Room", status["reason"])
-        self.assertIn("Girl's Room", status["reason"])
+        self.assertIn("Room One", status["reason"])
+        self.assertIn("Room Two", status["reason"])
         self.write_log("2026-10-29 06:18:00 boys-room: power on sent",
                        "2026-10-29 06:19:00 boys-room: cast sent",
                        "2026-10-29 06:19:01 girls-room: cast sent")
@@ -3287,10 +3287,11 @@ class HealthcheckTests(unittest.TestCase):
                        "2026-10-29 06:19:01 girls-room: power on sent",
                        "2026-10-29 06:19:02 boys-room: cast sent",
                        "2026-10-29 06:19:03 girls-room: cast sent")
-        self.write_net("2026-10-29 01:00:00 8 targets ok\n2026-10-29 06:00:00 1 targets ok\n")
+        self.write_net("2026-10-29 01:00:00 8 targets ok\n"
+                       "2026-10-29 06:00:00 netcheck: boys-room cast:8009 no route\n")
         self.boot = "2026-10-29T05:00:00"
         rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00")
-        self.assertIn("8 targets ok", status["reason"])
+        self.assertIn("does not say every target is ok", status["reason"])
         self.assertEqual(rc, 1)
         self.write_net("2026-10-29 01:00:00 1 targets ok\n2026-10-29 06:00:00 8 targets ok\n")
         self.write_plist("/usr/bin/python3")
@@ -3308,8 +3309,8 @@ class HealthcheckTests(unittest.TestCase):
             "2026-10-29 20:44:00 boys-room: cast sent")
         rc, _out, status = self.invoke("evening", "2026-10-29T20:45:00")
         self.assertEqual((rc, status["result"]), (0, "pass"))
-        self.assertIn("Daniel's Room", status["reason"])
-        self.assertIn("Girl's Room", status["reason"])
+        self.assertIn("Room One", status["reason"])
+        self.assertIn("Room Two", status["reason"])
         self.write_log(
             "2026-10-29 20:40:00 boys-room: sonos alarm for 2026-10-30: already on 06:00 ON_5",
             "2026-10-29 20:40:01 girls-room: sonos alarm for 2026-10-30: already off",
@@ -3327,6 +3328,17 @@ class HealthcheckTests(unittest.TestCase):
         rc, _out, status = self.invoke("evening", "2026-10-31T20:45:00")
         self.assertEqual((rc, status["result"]), (0, "pass"))
         self.assertIn("not a run day", " ".join(status["evidence"]))
+
+    def test_six_target_netcheck_is_healthy_without_sonos(self):
+        self.write_run_days(dt.datetime(2026, 10, 29, 6, 20, tzinfo=LA))
+        self.write_net("2026-10-29 06:00:00 6 targets ok")
+        self.write_log("2026-10-29 06:18:00 boys-room: power on sent",
+                       "2026-10-29 06:18:01 girls-room: power on sent",
+                       "2026-10-29 06:19:00 boys-room: cast sent",
+                       "2026-10-29 06:19:01 girls-room: cast sent")
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00")
+        self.assertEqual((rc, status["result"]), (0, "pass"))
+        self.assertIn("6 targets ok", " ".join(status["evidence"]))
 
     def test_webhook_posts_once_acks_delivered_ids_and_stays_quiet_without_one(self):
         self.write_run_days(dt.datetime(2026, 10, 29, 6, 20, tzinfo=LA))
