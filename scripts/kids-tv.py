@@ -11,12 +11,14 @@ leaveBy. is_run_day() decides whether today is a run day: schedule.json has the
 weekday on, the calendar run-days file says run for that date, and the date is
 not in kids-tv-skip.json. Monday through Friday are on in schedule.json, so the
 calendar can add or cancel any of those. Saturday and Sunday stay off there.
-The run-days file sets run from kids_home (a Dad's House event covering 6:00 AM)
-and not no_school. No run day means nothing runs. If the run-days file is
-missing, unreadable, stale or lacks the date, nothing runs and one ERROR is
-logged for the day. A times file that exists but will not parse or fails
-validation does the same: nothing runs (no TV, no Sonos alarm sync) and one
-alert is logged. A missing times file uses schedule.json. See README,
+The run-days file sets run = kids_home AND not no_school, from the private
+calendar (see the run-days routine). No run day means nothing runs. If the
+run-days file is missing, unreadable, stale or lacks the date, nothing runs
+and one ERROR is logged for the day. A times file that exists but will not
+parse or fails validation does not start the morning: no TV comes on, tomorrow's
+Sonos alarms are turned off, and one alert is logged. A TV that already came on
+still powers off at the leaveBy saved then, or at schedule.json's leaveBy.
+A missing times file uses schedule.json. See README,
 "Calendar run days" and "Local times".
 
     kids-tv.py plan [--date YYYY-MM-DD] [--json]   print the times, touch no TV
@@ -641,8 +643,8 @@ def is_run_day(schedule: dict, day: dt.date, skip_path=None, run_days_path=None,
     The skip list wins over a run of true. The run-days file is only read for a
     weekday the schedule has on, so a weekend (or any weekday left off) raises
     nothing. Saturday and Sunday stay off in schedule.json. The run-days file
-    sets run from kids_home (a Dad's House event covering 6:00 AM) and not
-    no_school; a weekend stays off here even when that flag is true. On and off
+    sets run = kids_home AND not no_school, from the private calendar (see the
+    run-days routine); a weekend stays off here even when that flag is true. On and off
     times come from resolved_day_times, so plan_for calls this and that, and
     nothing else decides a run day.
     """
@@ -1553,6 +1555,55 @@ def attempt(name: str, step: str, st: dict, now: dt.datetime, state_path, state:
     return True
 
 
+def _off_time(schedule: dict, day: dt.date, st: dict) -> Optional[dt.time]:
+    """leaveBy saved at power-on, else the weekday's leaveBy in schedule.json."""
+    saved = st.get("leave_by")
+    if isinstance(saved, str):
+        try:
+            return parse_hm(saved, "leaveBy")
+        except ScheduleError:
+            pass
+    times = schedule_day_times(schedule, day)
+    return None if times is None else times["leaveBy"]
+
+
+def _off_tvs_already_on(schedule, day, now, state_path, actions, log, dry_run, state_error,
+                       alert_path=None) -> int:
+    """Power off TVs that came on today. Returns how many off steps failed.
+
+    A broken times file must not leave a TV on all day. The off time is the
+    leaveBy saved when that TV was powered on, or schedule.json's leaveBy.
+    """
+    state, _corrupt = load_state(state_path, day)
+    failures = 0
+    try:
+        for name in TVS:
+            st = state["tvs"].get(name) or {}
+            if not st.get("power_on_done"):
+                continue
+            off = _off_time(schedule, day, st)
+            if off is None:
+                continue
+            off_at = dt.datetime.combine(day, off, tzinfo=now.tzinfo)
+            # on_at == off_at so decide can return "off" and cannot return "on"
+            step = decide(off_at, off_at, now, st)
+            if step != "off":
+                continue
+            if dry_run:
+                print("%s: would off" % name)
+                continue
+            with tv_lock(Path(state_path).parent, name) as held:
+                if not held:
+                    log("%s: another kids-tv command is using this TV; off skipped this tick" % name)
+                    continue
+                if not attempt(name, "off", st, now, state_path, state, actions, log, alert_path):
+                    failures += 1
+    except StateError as exc:
+        state_error("%s, so nothing more is sent today" % exc)
+        return failures + 1
+    return failures
+
+
 def tick(schedule: dict, now: dt.datetime, state_path, actions: Dict[str, Callable],
          log: Callable, dry_run: bool = False, error_marker=None, alert_path=None) -> int:
     """Do whatever is due. Returns the number of failed steps.
@@ -1576,7 +1627,10 @@ def tick(schedule: dict, now: dt.datetime, state_path, actions: Dict[str, Callab
         try:
             plan = plan_for(schedule, day, now, log=log, alert_path=alert_path)
         except TimesError:
-            return 1  # note_bad_times already alerted once; no TV
+            # note_bad_times already alerted once. Do not turn a TV on, but one
+            # that already came on today still powers off.
+            return _off_tvs_already_on(schedule, day, now, state_path, actions, log, dry_run, state_error,
+                                       alert_path) or 1
         if plan is None:
             return 0
         cast_board_url = board_url(plan["on"], plan["off"])
@@ -1604,6 +1658,8 @@ def tick(schedule: dict, now: dt.datetime, state_path, actions: Dict[str, Callab
                 if dry_run:
                     print("%s: would %s" % (name, step))
                     continue
+                if step == "on":
+                    st["leave_by"] = hm(plan["off"])  # so a later bad times file can still power off
                 with tv_lock(Path(state_path).parent, name) as held:
                     if not held:
                         log("%s: another kids-tv command is using this TV; %s skipped this tick" % (name, step))
@@ -2023,7 +2079,8 @@ def sonos_tick(schedule: dict, now: dt.datetime, state_path, alert_path, log: Ca
     tomorrow cannot be decided (for example the run-days file is stale), the
     alarm is left as it is and retried each tick until SONOS_SYNC_GIVE_UP,
     then an alert is written. A times file that exists but cannot be trusted
-    is not that path: one alert for tomorrow, and the alarm stays unchanged. A failed sync is retried on later ticks, up to
+    is not that path: one alert for tomorrow, and tomorrow's alarms are turned
+    off. A failed sync is retried on later ticks, up to
     MAX_ATTEMPTS, with an alert on the first failure.
     """
     if not sonos_config:
@@ -2102,41 +2159,36 @@ def sonos_evening_sync(schedule, now, state, state_path, alert_path, log, dry_ru
     day = now.date()
     tomorrow = day + dt.timedelta(days=1)
     try:
-        # Same check as the morning. A bad times file alerts now, for tomorrow,
-        # and the alarm is left unchanged. A later tick retries if the file is fixed.
+        # Same check as the morning. A bad times file alerts now, for tomorrow.
+        # Tomorrow's alarms are then turned off, so last week's repeat cannot fire.
         resolved_day_times(schedule, tomorrow, now=now, log=log, alert_path=alert_path)
-    except TimesError as exc:
-        for key in pending:
-            if dry_run:
-                print("%s: would leave the Sonos alarm unchanged: %s" % (key, exc))
-        return 0
-    try:
-        plan = plan_for(schedule, tomorrow, now, log=log, alert_path=alert_path)
-    except TimesError as exc:
-        for key in pending:
-            if dry_run:
-                print("%s: would leave the Sonos alarm unchanged: %s" % (key, exc))
-        return 0
-    except ScheduleError as exc:
-        give_up = now.time() >= SONOS_SYNC_GIVE_UP
-        for key in pending:
-            if dry_run:
-                print("%s: would leave the Sonos alarm unchanged: %s" % (key, exc))
-                continue
-            st = state["sync"].setdefault(key, {})
-            if not give_up:
-                if not st.get("undecided"):  # logged once; retried quietly each tick until SONOS_SYNC_GIVE_UP
-                    st["undecided"] = now.isoformat()
-                    save_state(state_path, state)
-                    log("%s: cannot tell yet whether %s runs (%s); alarm unchanged, retrying until %s"
-                        % (key, tomorrow.isoformat(), exc, hm(SONOS_SYNC_GIVE_UP)))
-                continue
-            state["sync"][key] = dict(st, done=now.isoformat(), result="left unchanged")
-            save_state(state_path, state)
-            write_alert(alert_path, day, key, "sonos-sync",
-                        "cannot tell whether %s runs (%s) by %s; alarm left unchanged"
-                        % (tomorrow.isoformat(), exc, hm(SONOS_SYNC_GIVE_UP)), now, log)
-        return len(pending) if give_up and not dry_run else 0
+    except TimesError:
+        plan = None
+    else:
+        try:
+            plan = plan_for(schedule, tomorrow, now, log=log, alert_path=alert_path)
+        except TimesError:
+            plan = None
+        except ScheduleError as exc:
+            give_up = now.time() >= SONOS_SYNC_GIVE_UP
+            for key in pending:
+                if dry_run:
+                    print("%s: would leave the Sonos alarm unchanged: %s" % (key, exc))
+                    continue
+                st = state["sync"].setdefault(key, {})
+                if not give_up:
+                    if not st.get("undecided"):  # logged once; retried quietly each tick until SONOS_SYNC_GIVE_UP
+                        st["undecided"] = now.isoformat()
+                        save_state(state_path, state)
+                        log("%s: cannot tell yet whether %s runs (%s); alarm unchanged, retrying until %s"
+                            % (key, tomorrow.isoformat(), exc, hm(SONOS_SYNC_GIVE_UP)))
+                    continue
+                state["sync"][key] = dict(st, done=now.isoformat(), result="left unchanged")
+                save_state(state_path, state)
+                write_alert(alert_path, day, key, "sonos-sync",
+                            "cannot tell whether %s runs (%s) by %s; alarm left unchanged"
+                            % (tomorrow.isoformat(), exc, hm(SONOS_SYNC_GIVE_UP)), now, log)
+            return len(pending) if give_up and not dry_run else 0
     alarm_time = plan["on"] if plan else None
     failures = 0
     for key in pending:

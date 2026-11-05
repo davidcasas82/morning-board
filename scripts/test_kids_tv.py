@@ -476,8 +476,7 @@ class RunDaysTests(unittest.TestCase):
         self.assertNotIn("SECRET-NOTE", err.getvalue())
 
     def test_repo_has_no_calendar_ids_custody_words_or_school_names(self):
-        # The run-days note names the morning event on purpose, so that phrase is not banned.
-        bad = re.compile("|".join(["group" + r"\.calendar", "mom'?s" + " house", "kid" + " rotation"]), re.I)
+        bad = re.compile("|".join(["group" + r"\.calendar", "dad'?s" + " house", "mom'?s" + " house", "kid" + " rotation"]), re.I)
         for path in (Path(kt.__file__), Path(__file__), ROOT / "README.md", ROOT / "kids-tv-skip.json"):
             self.assertIsNone(bad.search(path.read_text()), path.name)
 
@@ -594,6 +593,21 @@ class TimesOverrideTests(unittest.TestCase):
         self.assertEqual([(a["date"], a["tv"], a["step"]) for a in alerts], [("2026-10-29", "schedule", "times")])
         self.assertIn("nothing runs", alerts[0]["error"])
         self.assertEqual(len([m for m in logs if str(m).startswith("ALERT:")]), 1)
+
+    def test_a_tv_that_came_on_still_powers_off_when_times_breaks(self):
+        rec = Recorder()
+        state = self.dir / "s.json"
+        log = kt.Log(self.dir / "l.log")
+        with self.use_times({"weekdays": {"thursday": {"alarm": "06:00", "leaveBy": "06:30"}}}):
+            self.assertEqual(kt.tick(SCHEDULE, at(THU, 6, 0), state, rec.actions(), log, alert_path=self.alert), 0)
+            self.assertIn(("on", "boys-room"), rec.calls)
+            self.assertIn(("on", "girls-room"), rec.calls)
+            self.times.write_text("{not json")
+            rec.calls.clear()
+            kt.tick(SCHEDULE, at(THU, 6, 30), state, rec.actions(), log, alert_path=self.alert)
+        self.assertEqual([c for c in rec.calls if c[0] == "off"],
+                         [("off", "boys-room"), ("off", "girls-room")])
+        self.assertFalse(any(c[0] == "on" for c in rec.calls))
 
     def test_a_bad_entry_is_also_a_bad_file(self):
         logs = []
@@ -1873,14 +1887,22 @@ class SonosTests(unittest.TestCase):
         self.assertEqual(self.alarm(GIRLS_UID)[0]["Recurrence"], "ON_1")
         self.assertEqual(self.alarm(GIRLS_UID)[0]["Enabled"], "1")
 
-    def test_evening_sync_alerts_for_a_bad_times_file_and_does_not_touch_the_alarm(self):
+    def test_evening_sync_turns_tomorrows_alarm_off_when_times_is_broken(self):
+        # Last week's repeating alarm is armed. A bad times file must turn it off.
+        self.fake.alarms[0].update(Enabled="1", Recurrence="ON_145", StartTime="06:00:00")
+        self.fake.alarms.append(listed("18", BOYS_UID, QUEUE, enabled="1", start="06:00:00", rec="ON_145"))
         times = Path(self.tmp.name, "times.json")
         times.write_text("{not json")
         when = dt.datetime(2026, 11, 1, 20, 30, tzinfo=LA)
         with mock.patch.dict(os.environ, {"KIDS_TV_TIMES": str(times)}):
             self.assertEqual(self.tick(when), 0)
             self.assertEqual(self.tick(when.replace(minute=31)), 0)
-        self.assertEqual(self.fake.writes(), [])
+        self.assertEqual(self.alarm(GIRLS_UID)[0]["Enabled"], "0")
+        self.assertEqual(self.alarm(BOYS_UID)[0]["Enabled"], "0")
+        self.assertEqual(self.alarm(OTHER_UID)[0]["Enabled"], "1")
+        updates = [args for action, args in self.fake.writes() if action == "UpdateAlarm"]
+        self.assertEqual(sorted(u["ID"] for u in updates), ["18", "5"])
+        self.assertTrue(all(u["Enabled"] == "0" for u in updates))
         alerts = self.alerts()
         self.assertEqual([(a["date"], a["tv"], a["step"]) for a in alerts], [("2026-11-02", "schedule", "times")])
         self.assertIn("nothing runs", alerts[0]["error"])
