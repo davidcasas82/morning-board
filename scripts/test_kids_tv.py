@@ -3269,14 +3269,7 @@ class HealthcheckTests(unittest.TestCase):
 
     def test_stale_log_bad_netcheck_and_wrong_program_arguments(self):
         self.write_run_days(dt.datetime(2026, 10, 29, 6, 20, tzinfo=LA))
-        self.write_log("2026-10-29 06:00:00 boys-room: power on sent",
-                       "2026-10-29 06:00:01 girls-room: power on sent",
-                       "2026-10-29 06:00:02 boys-room: cast sent",
-                       "2026-10-29 06:00:03 girls-room: cast sent")
         self.write_net("2026-10-29 06:00:00 8 targets ok")
-        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00")
-        self.assertEqual(rc, 1)
-        self.assertIn("more than 10 minutes", status["reason"])
         self.write_log("2026-10-29 06:19:00 boys-room: power on sent",
                        "2026-10-29 06:19:01 girls-room: power on sent",
                        "2026-10-29 06:19:02 boys-room: cast sent",
@@ -3350,6 +3343,40 @@ class HealthcheckTests(unittest.TestCase):
             rc, _out, status = self.invoke("evening", day + "T20:45:00")
             self.assertEqual((rc, status["result"]), (0, "pass"), status)
             self.assertNotIn("10 minutes", status["reason"])
+
+    def test_on_check_passes_a_clean_060140_log_at_0614_and_after_waking(self):
+        self.sonos()
+        self.write_net("2026-11-02 06:00:00 6 targets ok")
+        self.write_log(
+            "2026-11-02 06:00:20 boys-room: power on sent",
+            "2026-11-02 06:00:40 girls-room: power on sent",
+            "2026-11-02 06:01:00 boys-room: cast sent",
+            "2026-11-02 06:01:10 girls-room: cast sent",
+            "2026-11-02 06:01:20 boys-room: sonos playing after alarm",
+            "2026-11-02 06:01:40 girls-room: sonos playing after alarm")
+        for clock in ("2026-11-02T06:14:00", "2026-11-02T06:45:00"):
+            self.write_run_days(dt.datetime.fromisoformat(clock).replace(tzinfo=LA))
+            rc, _out, status = self.invoke("morning-on", clock)
+            self.assertEqual((rc, status["result"]), (0, "pass"), status)
+            self.assertNotIn("last written", status["reason"])
+
+    def test_on_check_fails_when_nothing_was_logged_after_the_alarm(self):
+        self.sonos()
+        self.write_run_days(dt.datetime(2026, 11, 2, 6, 14, tzinfo=LA))
+        self.write_net("2026-11-02 06:00:00 6 targets ok")
+        self.write_log(
+            "2026-11-01 06:01:40 boys-room: power on sent",
+            "2026-11-01 06:01:41 girls-room: power on sent",
+            "2026-11-02 05:59:50 boys-room: power on sent",
+            "2026-11-02 05:59:51 girls-room: power on sent",
+            "2026-11-02 05:59:52 boys-room: cast sent",
+            "2026-11-02 05:59:53 girls-room: cast sent",
+            "2026-11-02 05:59:54 boys-room: sonos playing after alarm",
+            "2026-11-02 05:59:55 girls-room: sonos playing after alarm")
+        rc, _out, status = self.invoke("morning-on", "2026-11-02T06:14:00")
+        self.assertEqual(rc, 1)
+        self.assertIn("did not turn on", status["reason"])
+        self.assertNotIn("last written", status["reason"])
 
     def test_a_retry_that_recovers_passes_the_on_check(self):
         when = dt.datetime(2026, 10, 29, 6, 10, tzinfo=LA)

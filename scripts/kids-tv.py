@@ -2331,7 +2331,6 @@ def netcheck(targets: List[tuple], alert_path, log: Callable, now: dt.datetime, 
 # resolved_day_times: on at alarm + ON_CHECK_AFTER, off at leaveBy + OFF_GRACE,
 # each once per day. Evening is a separate 20:45 run.
 
-HEALTH_LOG_FRESH = dt.timedelta(minutes=10)
 HEALTH_PROBLEM_WINDOW = dt.timedelta(hours=2)
 HEALTH_EVENING = dt.time(20, 45)
 HELPER_EXE = "Applications/MorningBoardTVHelper.app/Contents/MacOS/kids-tv-helper"
@@ -2476,24 +2475,42 @@ def _json_object(path):
     return data if isinstance(data, dict) else None
 
 
-def _tv_evidence(lines, state, day: dt.date, name: str, step: str):
+def _not_before_ok(stamp: dt.datetime, not_before: Optional[dt.datetime]) -> bool:
+    """True when a stamp is at or after the alarm. No alarm bound means any stamp."""
+    if not_before is None:
+        return True
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=not_before.tzinfo)
+    return stamp >= not_before
+
+
+def _tv_evidence(lines, state, day: dt.date, name: str, step: str, not_before: Optional[dt.datetime] = None):
     phrase = _TV_PHRASE[step]
     if lines:
         for stamp, message, raw in lines:
+            if not _not_before_ok(stamp, not_before):
+                continue
             if stamp.date() == day and message == "%s: %s" % (name, phrase):
                 return raw
     if state and state.get("date") == day.isoformat():
         tvs = state.get("tvs") if isinstance(state.get("tvs"), dict) else {}
         value = (tvs.get(name) or {}).get(_TV_STATE_KEY[step]) if isinstance(tvs.get(name), dict) else None
         if isinstance(value, str) and value not in ("", "unknown"):
+            if not_before is not None:
+                try:
+                    done = dt.datetime.fromisoformat(value)
+                except ValueError:
+                    return None
+                if not _not_before_ok(done, not_before):
+                    return None
             return "state: %s %s %s" % (name, _TV_STATE_KEY[step], value)
     return None
 
 
-def _sonos_morning_evidence(lines, sonos_state, day: dt.date, key: str):
+def _sonos_morning_evidence(lines, sonos_state, day: dt.date, key: str, not_before: Optional[dt.datetime] = None):
     if lines:
         for stamp, message, raw in lines:
-            if stamp.date() != day:
+            if stamp.date() != day or not _not_before_ok(stamp, not_before):
                 continue
             if message == "%s: sonos playing after alarm" % key:
                 return raw
@@ -2503,6 +2520,14 @@ def _sonos_morning_evidence(lines, sonos_state, day: dt.date, key: str):
         entry = (sonos_state.get("check") or {}).get(key) if isinstance(sonos_state.get("check"), dict) else None
         if isinstance(entry, dict) and ("ok" in entry or "play_sent" in entry):
             which = "ok" if "ok" in entry else "play_sent"
+            if not_before is not None:
+                raw_when = entry.get(which)
+                try:
+                    done = dt.datetime.fromisoformat(raw_when) if isinstance(raw_when, str) else None
+                except ValueError:
+                    done = None
+                if done is None or not _not_before_ok(done, not_before):
+                    return None
             return "state: %s check %s" % (key, which)
     return None
 
@@ -2568,23 +2593,18 @@ def _boot_time(override, zone):
     return None
 
 
-def _common_findings(now, zone, args, ignore_times_alert: bool = False, fresh_log: bool = True) -> tuple:
+def _common_findings(now, zone, args, ignore_times_alert: bool = False) -> tuple:
     """Findings that apply to every check that actually runs. (problems, evidence).
 
-    fresh_log is the on check only. The off check and the evening check read a
-    result the job wrote when it acted (the off, or the 20:30 sync), which is
-    often more than 10 minutes before the check.
+    No check requires the log to have been written in the last few minutes.
+    The job writes only when it acts. The on check looks for today's power-on,
+    cast, and Sonos lines from after the alarm.
     """
     problems, evidence = [], []
     lines = read_stamp_lines(args.log, zone)
     if not lines:
         problems.append("the morning-board log has not been written")
     else:
-        newest = max(lines, key=lambda row: row[0])
-        if fresh_log and now - newest[0] > HEALTH_LOG_FRESH:
-            problems.append("the morning-board log was last written at %s, which is more than 10 minutes ago"
-                            % newest[0].strftime("%H:%M"))
-            evidence.append(newest[2])
         flagged = 0
         for index, (stamp, message, raw) in enumerate(lines):
             if ignore_times_alert and _times_alert_line(message):
@@ -2650,10 +2670,18 @@ def _evaluate_slot(slot: str, now, schedule, lines, state, sonos_state, broken: 
         if not runs:
             evidence.append("%s is not a run day, so the TVs stay off" % day.isoformat())
             return problems, evidence, "Today is not a run day, so the TVs were not expected on."
+        alarm_at = None
+        if slot == "morning-on":
+            try:
+                times = resolved_day_times(schedule, day, now=now)
+            except TimesError:
+                times = None
+            if times:
+                alarm_at = dt.datetime.combine(day, times["alarm"], tzinfo=now.tzinfo)
         for name in TVS:
             if slot == "morning-on":
-                turned_on = _tv_evidence(lines, state, day, name, "on")
-                cast = _tv_evidence(lines, state, day, name, "cast")
+                turned_on = _tv_evidence(lines, state, day, name, "on", alarm_at)
+                cast = _tv_evidence(lines, state, day, name, "cast", alarm_at)
                 if not turned_on:
                     problems.append("%s did not turn on" % name)
                 else:
@@ -2675,7 +2703,7 @@ def _evaluate_slot(slot: str, now, schedule, lines, state, sonos_state, broken: 
             if missing:
                 problems.append("Sonos config has no " + ", ".join(missing))
             for key in sonos_config["rooms"]:
-                found = _sonos_morning_evidence(lines, sonos_state, day, key)
+                found = _sonos_morning_evidence(lines, sonos_state, day, key, alarm_at)
                 if not found:
                     problems.append("%s alarm did not fire and Play was not sent" % key)
                 else:
@@ -2808,10 +2836,7 @@ def _healthcheck_run(args, log) -> int:
     state = _json_object(args.state)
     sonos_state = _json_object(sonos_state_path(args))
     alert_path = args.alert or default_alert_path()
-    # Only the on check expects a log line in the last 10 minutes. Off and evening
-    # read the line the job wrote when it acted, which is earlier than the check.
-    problems, evidence = _common_findings(
-        now, zone, args, ignore_times_alert=broken, fresh_log=slots == ["morning-on"])
+    problems, evidence = _common_findings(now, zone, args, ignore_times_alert=broken)
     reasons = []
     for slot in slots:
         slot_problems, slot_evidence, reason = _evaluate_slot(
