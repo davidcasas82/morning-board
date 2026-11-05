@@ -1646,8 +1646,8 @@ let lastCalendarStamp = '';
 const DEFAULT_SCHEDULE = {
   days: {
         monday:    { enabled: true,  label: 'School day',        alarm: '06:00', leaveBy: '07:10' },
-        tuesday:   { enabled: false, label: 'Not here',          alarm: null,    leaveBy: null },
-        wednesday: { enabled: false, label: 'Not here',          alarm: null,    leaveBy: null },
+        tuesday:   { enabled: true,  label: 'School day',        alarm: '06:00', leaveBy: '07:10' },
+        wednesday: { enabled: true,  label: 'School day',        alarm: '06:00', leaveBy: '07:10' },
         thursday:  { enabled: true,  label: 'School day',        alarm: '06:00', leaveBy: '07:10' },
         friday:    { enabled: true,  label: 'Late start Friday', alarm: '06:30', leaveBy: '07:40' },
     saturday:  { enabled: false, label: 'No school',         alarm: null,    leaveBy: null },
@@ -1775,7 +1775,7 @@ function fetchSchedule() {
     }
     return res.json().then(function (data) {
       applyScheduleData(data);
-      setScheduleStatus('Loaded from GitHub. School mornings here: Mon, Thu, Fri.');
+      setScheduleStatus('Loaded from GitHub. School mornings here: Mon-Fri. Sat and Sun stay off.');
       if (document.getElementById('sheetBg').classList.contains('open')) {
         buildWeekRows();
       }

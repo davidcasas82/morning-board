@@ -4,12 +4,18 @@
 On a board day, at the board's alarm time, turn on the two bedroom Vizio TVs
 and cast the morning board. At on-the-road time, power each one off once.
 
-Times come from schedule.json, read fresh on every run. Nothing is hard-coded.
-is_run_day() decides whether today is a run day: schedule.json has the weekday
-on, the calendar run-days file says run for that date, and the date is not in
-kids-tv-skip.json. No run day means nothing runs. If the run-days file is
-missing, unreadable, stale or lacks the date, nothing runs and one ERROR is
-logged for the day. See README, "Calendar run days".
+Times come from schedule.json, then from ~/.config/kids-tv/times.json when that
+file exists. Both are read fresh on every run. Nothing is hard-coded.
+resolved_day_times() is the only place that turns a date into an alarm and a
+leaveBy. is_run_day() decides whether today is a run day: schedule.json has the
+weekday on, the calendar run-days file says run for that date, and the date is
+not in kids-tv-skip.json. Monday through Friday are on in schedule.json, so the
+calendar can add or cancel any of those. Saturday and Sunday stay off there:
+the run-days file only marks no_school, and a weekend it does not mark must not
+wake the kids. No run day means nothing runs. If the run-days file is missing,
+unreadable, stale or lacks the date, nothing runs and one ERROR is logged for
+the day. A bad times file does not do that: the schedule times are used and one
+alert is logged. See README, "Calendar run days" and "Local times".
 
     kids-tv.py plan [--date YYYY-MM-DD] [--json]   print the times, touch no TV
     kids-tv.py tick                                what launchd runs every minute
@@ -17,6 +23,9 @@ logged for the day. See README, "Calendar run days".
     kids-tv.py info|stop|castcheck [--tv NAME]     read, stop, or cast-then-check-then-stop the cast
     kids-tv.py netcheck [--settle SECONDS]         open each TV and Sonos port once; alert on a block
     kids-tv.py alerts [--json] [--all] [--ack ID ... | --ack-all]   the alerts not yet acknowledged
+    kids-tv.py times show                          print resolved times for the next 7 days
+    kids-tv.py times set friday --alarm 06:30 --leave 07:40
+    kids-tv.py times set 2026-11-13 --alarm 07:00 --leave 08:10
 
 tick sends nothing to a TV outside the window: one power-on and cast per TV
 after alarm, one power-off per TV after on-the-road. Each is recorded in a
@@ -37,7 +46,9 @@ and, if it never played, sends Play once and alerts. See the Sonos section below
 Which env file belongs to which TV is local to the mini, in
 ~/.config/kids-tv/config.json ("tvs", and optionally "run_days_path" and
 "sonos"; each TV may also have an "mdns_name"); the repo only knows the
-neutral keys boys-room and girls-room. Tokens come from
+neutral keys boys-room and girls-room. Alarm and leaveBy overrides live in
+~/.config/kids-tv/times.json, created only by `times set`, never by tick.
+Tokens come from
 ~/.config/vizio/<env file> and are used only inside this script. They are
 never printed, logged, or put on a command line.
 Python 3.9 standard library only. Casting speaks the Cast protocol itself (see the
@@ -310,6 +321,12 @@ def default_run_days_path() -> Path:
     return Path(chosen).expanduser()
 
 
+def default_times_path() -> Path:
+    """KIDS_TV_TIMES, else ~/.config/kids-tv/times.json. Missing means no overrides."""
+    chosen = os.environ.get("KIDS_TV_TIMES") or (HOME / ".config" / "kids-tv" / "times.json")
+    return Path(chosen).expanduser()
+
+
 def clock() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
@@ -367,6 +384,190 @@ def run_day_says_run(path, day: dt.date, now: dt.datetime) -> bool:
     return entry["run"]
 
 
+def _times_table(raw, label: str, kind: str) -> dict:
+    """Validate one map from the times file. Raises ScheduleError on the first bad entry."""
+    if not isinstance(raw, dict):
+        raise ScheduleError(label + " is not an object")
+    out = {}
+    for key, entry in raw.items():
+        if kind == "weekday":
+            if not isinstance(key, str) or key not in DAY_KEYS:
+                raise ScheduleError("%s is not a weekday name" % key)
+            name = key
+        else:
+            if not isinstance(key, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", key):
+                raise ScheduleError("%s is not YYYY-MM-DD" % key)
+            try:
+                dt.date.fromisoformat(key)
+            except ValueError:
+                raise ScheduleError("%s is not a real date" % key)
+            name = key
+        if not isinstance(entry, dict):
+            raise ScheduleError(name + " is not an object")
+        on = parse_hm(entry.get("alarm"), name + " alarm")
+        off = parse_hm(entry.get("leaveBy"), name + " leaveBy")
+        if off <= on:
+            raise ScheduleError(name + " leaveBy is not after alarm")
+        out[name] = {"alarm": "%02d:%02d" % (on.hour, on.minute), "leaveBy": "%02d:%02d" % (off.hour, off.minute)}
+    return out
+
+
+def load_times_override(path) -> tuple:
+    """Return ({"weekdays", "dates"}, None), or ({}, reason) when the file cannot be trusted.
+
+    A missing file is no override, not an error. reason is one sentence. The
+    caller uses schedule.json and alerts once. Nothing here raises.
+    """
+    empty = {"weekdays": {}, "dates": {}}
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return empty, None
+    except OSError:
+        return empty, "times override file is unreadable; using schedule defaults"
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return empty, "times override file is not valid JSON; using schedule defaults"
+    if not isinstance(data, dict):
+        return empty, "times override file is not an object; using schedule defaults"
+    try:
+        weekdays = _times_table(data["weekdays"], "weekdays", "weekday") if "weekdays" in data else {}
+        dates = _times_table(data["dates"], "dates", "date") if "dates" in data else {}
+    except ScheduleError as exc:
+        return empty, "times override file: %s; using schedule defaults" % exc
+    return {"weekdays": weekdays, "dates": dates}, None
+
+
+def save_times_override(path, data: dict) -> None:
+    """Replace the times file atomically. Creates the parent directory."""
+    path = Path(path)
+    body = {
+        "weekdays": {k: data["weekdays"][k] for k in DAY_KEYS if k in data["weekdays"]},
+        "dates": {k: data["dates"][k] for k in sorted(data["dates"])},
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(body, indent=1) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        raise ScheduleError("cannot write times override file (%s)" % exc.__class__.__name__)
+
+
+def parse_times_target(which: str) -> tuple:
+    """("weekday", "friday") or ("date", "YYYY-MM-DD")."""
+    if not isinstance(which, str) or not which.strip():
+        raise ScheduleError("times set needs a weekday name or YYYY-MM-DD")
+    text = which.strip()
+    low = text.lower()
+    if low in DAY_KEYS:
+        return "weekday", low
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        try:
+            dt.date.fromisoformat(text)
+        except ValueError:
+            raise ScheduleError("times set date is not a real YYYY-MM-DD")
+        return "date", text
+    raise ScheduleError("times set needs a weekday name or YYYY-MM-DD")
+
+
+def set_times_override(path, which: str, alarm: str, leave: str) -> None:
+    """Merge one weekday or one date into the times file. A bad existing file is left untouched."""
+    kind, key = parse_times_target(which)
+    on = parse_hm(alarm, "alarm")
+    off = parse_hm(leave, "leaveBy")
+    if off <= on:
+        raise ScheduleError("leaveBy is not after alarm")
+    current, problem = load_times_override(path)
+    if problem:
+        raise ScheduleError(problem.replace("using schedule defaults", "not written"))
+    slot = {"alarm": "%02d:%02d" % (on.hour, on.minute), "leaveBy": "%02d:%02d" % (off.hour, off.minute)}
+    current["weekdays" if kind == "weekday" else "dates"][key] = slot
+    save_times_override(path, current)
+
+
+def _times_stderr(message: str, stamp: Optional[dt.datetime] = None) -> None:
+    sys.stderr.write(message + "\n")
+
+
+def note_bad_times(problem: str, now: Optional[dt.datetime], log: Optional[Callable], alert_path) -> None:
+    """One alert for this day. write_alert itself writes nothing the second time."""
+    when = now or clock()
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=dt.timezone.utc)
+    write_alert(default_alert_path() if alert_path is None else alert_path, when.date(), "schedule", "times",
+                problem, when, log or _times_stderr)
+
+
+def schedule_day_times(schedule: dict, day: dt.date) -> Optional[dict]:
+    """schedule.json's alarm and leaveBy for this weekday, or None when it has neither.
+
+    A present time that is not HH:MM, or a leaveBy that is not after the alarm,
+    raises ScheduleError. That is the schedule itself, not the override file.
+    """
+    key = DAY_KEYS[day.weekday()]
+    entry = schedule["days"].get(key)
+    if not isinstance(entry, dict) or not entry.get("alarm") or not entry.get("leaveBy"):
+        return None
+    on = parse_hm(entry["alarm"], key + " alarm")
+    off = parse_hm(entry["leaveBy"], key + " leaveBy")
+    if off <= on:
+        raise ScheduleError(key + " leaveBy is not after alarm")
+    return {"alarm": on, "leaveBy": off}
+
+
+def resolved_day_times(schedule: dict, day: dt.date, times_path=None, now: Optional[dt.datetime] = None,
+                       log: Optional[Callable] = None, alert_path=None) -> Optional[dict]:
+    """Alarm and leaveBy for one date. The only place those times are chosen.
+
+    A date entry in the times file wins over that weekday's entry, which wins
+    over schedule.json. A missing file means the schedule. A bad file means the
+    schedule too, and one alert for the day (note_bad_times): the morning still
+    runs. Returns {"alarm", "leaveBy"} as datetime.time, or None when that
+    weekday has no schedule times and no usable override.
+    """
+    path = Path(times_path) if times_path is not None else default_times_path()
+    override, problem = load_times_override(path)
+    picked = None
+    if problem:
+        note_bad_times(problem, now, log, alert_path)
+    else:
+        picked = override["dates"].get(day.isoformat()) or override["weekdays"].get(DAY_KEYS[day.weekday()])
+    if picked:
+        return {"alarm": parse_hm(picked["alarm"], "times alarm"),
+                "leaveBy": parse_hm(picked["leaveBy"], "times leaveBy")}
+    return schedule_day_times(schedule, day)
+
+
+def render_times(schedule: dict, start: dt.date, times_path=None, now: Optional[dt.datetime] = None,
+                 log: Optional[Callable] = None, alert_path=None) -> str:
+    """The next 7 days, then every saved date override."""
+    path = Path(times_path) if times_path is not None else default_times_path()
+    data, problem = load_times_override(path)
+    lines = [problem] if problem else []
+    for offset in range(7):
+        day = start + dt.timedelta(days=offset)
+        times = resolved_day_times(schedule, day, path, now, log, alert_path)
+        key = DAY_KEYS[day.weekday()]
+        if times is None:
+            lines.append("%s %s: no times" % (day.isoformat(), key))
+            continue
+        source = "schedule"
+        if problem is None and day.isoformat() in data["dates"]:
+            source = "date"
+        elif problem is None and key in data["weekdays"]:
+            source = "weekday"
+        lines.append("%s %s: alarm %s, leaveBy %s (%s)" % (
+            day.isoformat(), key, hm(times["alarm"]), hm(times["leaveBy"]), source))
+    if problem is None:
+        for key in sorted(data["dates"]):
+            entry = data["dates"][key]
+            lines.append("%s: alarm %s, leaveBy %s (date)" % (key, entry["alarm"], entry["leaveBy"]))
+    return "\n".join(lines)
+
+
 def schedule_zone(schedule: dict) -> ZoneInfo:
     name = schedule.get("timezone") or DEFAULT_TZ
     try:
@@ -388,9 +589,11 @@ def is_run_day(schedule: dict, day: dt.date, skip_path=None, run_days_path=None,
       3. The calendar run-days file (see run_day_says_run) says run is true for
          the date. Its errors raise RunDaysError: nothing runs, one error is logged.
     The skip list wins over a run of true. The run-days file is only read for a
-    weekday the schedule has on, so a Tuesday with no board raises nothing.
-    On and off times still come from schedule.json, so plan_for calls this and
-    nothing else decides a run day.
+    weekday the schedule has on, so a weekend (or any weekday left off) raises
+    nothing. Saturday and Sunday stay off in schedule.json on purpose: the
+    run-days file only marks no_school, so a weekend it does not mark must not
+    run. On and off times come from resolved_day_times, so plan_for calls this
+    and that, and nothing else decides a run day.
     """
     skipped = day in load_skip_dates(skip_path or default_skip_path())
     entry = schedule["days"].get(DAY_KEYS[day.weekday()])
@@ -402,22 +605,22 @@ def is_run_day(schedule: dict, day: dt.date, skip_path=None, run_days_path=None,
     return run_day_says_run(run_days_path or default_run_days_path(), day, now or clock())
 
 
-def plan_for(schedule: dict, day: dt.date, now: Optional[dt.datetime] = None) -> Optional[dict]:
+def plan_for(schedule: dict, day: dt.date, now: Optional[dt.datetime] = None, *,
+             log: Optional[Callable] = None, alert_path=None, times_path=None) -> Optional[dict]:
     """Return {"label", "on", "off"} for a run day, None when nothing runs.
 
-    The times are alarm and leaveBy: on-the-road time, not downstairs time.
+    The times are alarm and leaveBy from resolved_day_times: on-the-road time,
+    not downstairs time. Tick, the evening Sonos sync, and `plan` all use this.
     """
     if not is_run_day(schedule, day, now=now):
         return None
     key = DAY_KEYS[day.weekday()]
     entry = schedule["days"].get(key)
-    if not isinstance(entry, dict) or not entry.get("alarm") or not entry.get("leaveBy"):
+    times = resolved_day_times(schedule, day, times_path, now, log, alert_path)
+    if times is None:
         raise ScheduleError(key + " is a run day but has no alarm and leaveBy")
-    on = parse_hm(entry["alarm"], key + " alarm")
-    off = parse_hm(entry["leaveBy"], key + " leaveBy")
-    if off <= on:
-        raise ScheduleError(key + " leaveBy is not after alarm")
-    return {"label": entry.get("label") or "", "on": on, "off": off}
+    label = entry.get("label") if isinstance(entry, dict) else ""
+    return {"label": label or "", "on": times["alarm"], "off": times["leaveBy"]}
 
 
 def hm(t: dt.time) -> str:
@@ -1315,7 +1518,7 @@ def tick(schedule: dict, now: dt.datetime, state_path, actions: Dict[str, Callab
         else:
             report_error_once(message, day, error_marker, log)
 
-    plan = plan_for(schedule, day, now)
+    plan = plan_for(schedule, day, now, log=log, alert_path=alert_path)
     if plan is None:
         return 0
     on_at = dt.datetime.combine(day, plan["on"], tzinfo=now.tzinfo)
@@ -1753,8 +1956,9 @@ def sonos_tick(schedule: dict, now: dt.datetime, state_path, alert_path, log: Ca
     SONOS_CHECK_AFTER (before ON_GRACE), a room never seen playing gets one
     last read, then one Play (only if play_check, default on) and an alert.
     Evening: from SONOS_SYNC_AT, once per room per day, set each room's alarm
-    for tomorrow (sync_room_alarm): on at tomorrow's alarm if tomorrow is a run
-    day (is_run_day: schedule, run-days file and skip list), off if not. If
+    for tomorrow (sync_room_alarm): on at tomorrow's resolved alarm
+    (resolved_day_times) if tomorrow is a run day (is_run_day: schedule,
+    run-days file and skip list), off if not. If
     tomorrow cannot be decided (for example the run-days file is stale), the
     alarm is left as it is and retried each tick until SONOS_SYNC_GIVE_UP,
     then an alert is written. A failed sync is retried on later ticks, up to
@@ -1775,7 +1979,7 @@ def sonos_tick(schedule: dict, now: dt.datetime, state_path, alert_path, log: Ca
                 report("sonos state file is unreadable, so no Sonos step runs today")
             return 0 if dry_run else 1
         try:
-            plan = plan_for(schedule, day, now)
+            plan = plan_for(schedule, day, now, log=log, alert_path=alert_path)
         except ScheduleError:
             plan = None  # the TV part reports today's schedule errors
         if plan:
@@ -1836,7 +2040,7 @@ def sonos_evening_sync(schedule, now, state, state_path, alert_path, log, dry_ru
     day = now.date()
     tomorrow = day + dt.timedelta(days=1)
     try:
-        plan = plan_for(schedule, tomorrow, now)
+        plan = plan_for(schedule, tomorrow, now, log=log, alert_path=alert_path)
     except ScheduleError as exc:
         give_up = now.time() >= SONOS_SYNC_GIVE_UP
         for key in pending:
@@ -1980,6 +2184,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Kids' bedroom TVs show the morning board.")
     p.add_argument("--schedule", default=None, help="schedule.json (default: this repo's)")
     p.add_argument("--run-days", default=None, help="calendar run-days file (default: KIDS_TV_RUN_DAYS, the local config's run_days_path, or ~/.config/kids-tv/run-days.json)")
+    p.add_argument("--times", default=None, help="local alarm and leaveBy overrides (default: KIDS_TV_TIMES or ~/.config/kids-tv/times.json)")
     p.add_argument("--config", default=None, help="local config (default: ~/.config/kids-tv/config.json)")
     p.add_argument("--config-dir", default=str(HOME / ".config" / "vizio"))
     p.add_argument("--state", default=str(HOME / "Library" / "Application Support" / "morning-board" / "kids-tv-state.json"))
@@ -2009,6 +2214,13 @@ def build_parser() -> argparse.ArgumentParser:
     al.add_argument("--all", action="store_true", help="include acknowledged alerts")
     al.add_argument("--ack", nargs="+", default=[], metavar="ID", help="acknowledge these alert IDs")
     al.add_argument("--ack-all", action="store_true", help="acknowledge every alert in the file")
+    times = sub.add_parser("times", help="show or set local alarm and leaveBy overrides; touches no TV")
+    times_sub = times.add_subparsers(dest="times_cmd", required=True)
+    times_sub.add_parser("show", help="print resolved times for the next 7 days and any later date override")
+    set_cmd = times_sub.add_parser("set", help="set one weekday or one date")
+    set_cmd.add_argument("which", help="weekday name (friday) or YYYY-MM-DD")
+    set_cmd.add_argument("--alarm", required=True, help="HH:MM")
+    set_cmd.add_argument("--leave", required=True, help="HH:MM, after the alarm")
     return p
 
 
@@ -2048,17 +2260,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     log = Log(args.log)
     if args.run_days:
         os.environ["KIDS_TV_RUN_DAYS"] = args.run_days
+    if args.times:
+        os.environ["KIDS_TV_TIMES"] = args.times
     schedule_path = args.schedule or default_schedule_path()
     error_day = dt.date.today()
     try:
         apply_local_config(load_local_config(args.config or default_config_path()))
+        if args.cmd == "times":
+            schedule = load_schedule(schedule_path)
+            path = default_times_path()
+            if args.times_cmd == "set":
+                set_times_override(path, args.which, args.alarm, args.leave)
+                print("wrote %s" % path)
+                return 0
+            now = dt.datetime.now(schedule_zone(schedule))
+            print(render_times(schedule, now.date(), path, now, log, args.alert or default_alert_path()))
+            return 0
         if args.cmd == "plan":
             schedule = load_schedule(schedule_path)
             # now carries the schedule's zone (America/Los_Angeles), as in tick, so a
             # generated_at without a zone is read as LA time by both.
             now = dt.datetime.now(schedule_zone(schedule))
             day = dt.date.fromisoformat(args.date) if args.date else now.date()
-            plan = plan_for(schedule, day, now)
+            plan = plan_for(schedule, day, now, log=log, alert_path=args.alert or default_alert_path())
             if args.json:
                 out = None if plan is None else {"date": day.isoformat(), "label": plan["label"],
                                                   "tvs": {n: {"on": hm(plan["on"]), "off": hm(plan["off"])} for n in TVS}}
