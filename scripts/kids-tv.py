@@ -10,12 +10,14 @@ resolved_day_times() is the only place that turns a date into an alarm and a
 leaveBy. is_run_day() decides whether today is a run day: schedule.json has the
 weekday on, the calendar run-days file says run for that date, and the date is
 not in kids-tv-skip.json. Monday through Friday are on in schedule.json, so the
-calendar can add or cancel any of those. Saturday and Sunday stay off there:
-the run-days file only marks no_school, and a weekend it does not mark must not
-wake the kids. No run day means nothing runs. If the run-days file is missing,
-unreadable, stale or lacks the date, nothing runs and one ERROR is logged for
-the day. A bad times file does not do that: the schedule times are used and one
-alert is logged. See README, "Calendar run days" and "Local times".
+calendar can add or cancel any of those. Saturday and Sunday stay off there.
+The run-days file sets run from kids_home (a Dad's House event covering 6:00 AM)
+and not no_school. No run day means nothing runs. If the run-days file is
+missing, unreadable, stale or lacks the date, nothing runs and one ERROR is
+logged for the day. A times file that exists but will not parse or fails
+validation does the same: nothing runs (no TV, no Sonos alarm sync) and one
+alert is logged. A missing times file uses schedule.json. See README,
+"Calendar run days" and "Local times".
 
     kids-tv.py plan [--date YYYY-MM-DD] [--json]   print the times, touch no TV
     kids-tv.py tick                                what launchd runs every minute
@@ -76,6 +78,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -87,6 +90,12 @@ ROOT = Path(__file__).resolve().parents[1]
 HOME = Path.home()
 
 BOARD_URL = "https://davidcasas82.github.io/morning-board/"
+# The address _cast_once sends. tick and a manual cast set this to board_url()
+# for the day, then put the previous value back.
+cast_board_url = BOARD_URL
+# times set refuses an alarm or leaveBy outside these, inclusive.
+ALARM_WINDOW = (dt.time(5, 0), dt.time(9, 0))
+LEAVE_WINDOW = (dt.time(6, 0), dt.time(10, 0))
 DAY_KEYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 # name -> (env file, key prefix). The files hold <PREFIX>IP and <PREFIX>TOKEN.
 # These are the defaults; the mini's local config (default_config_path) can map a
@@ -202,6 +211,10 @@ class StateError(Exception):
 
 class RunDaysError(ScheduleError):
     """The calendar run-days file cannot be trusted. Nothing runs that day."""
+
+
+class TimesError(ScheduleError):
+    """The times file exists but cannot be trusted. Nothing runs that day."""
 
 
 # ---------------------------------------------------------------- schedule
@@ -415,8 +428,9 @@ def _times_table(raw, label: str, kind: str) -> dict:
 def load_times_override(path) -> tuple:
     """Return ({"weekdays", "dates"}, None), or ({}, reason) when the file cannot be trusted.
 
-    A missing file is no override, not an error. reason is one sentence. The
-    caller uses schedule.json and alerts once. Nothing here raises.
+    A missing file is no override, not an error. reason is one sentence ending
+    "so nothing runs". The caller alerts once and does not run that day.
+    Nothing here raises.
     """
     empty = {"weekdays": {}, "dates": {}}
     path = Path(path)
@@ -425,18 +439,18 @@ def load_times_override(path) -> tuple:
     except FileNotFoundError:
         return empty, None
     except OSError:
-        return empty, "times override file is unreadable; using schedule defaults"
+        return empty, "times override file is unreadable, so nothing runs"
     try:
         data = json.loads(text)
     except ValueError:
-        return empty, "times override file is not valid JSON; using schedule defaults"
+        return empty, "times override file is not valid JSON, so nothing runs"
     if not isinstance(data, dict):
-        return empty, "times override file is not an object; using schedule defaults"
+        return empty, "times override file is not an object, so nothing runs"
     try:
         weekdays = _times_table(data["weekdays"], "weekdays", "weekday") if "weekdays" in data else {}
         dates = _times_table(data["dates"], "dates", "date") if "dates" in data else {}
     except ScheduleError as exc:
-        return empty, "times override file: %s; using schedule defaults" % exc
+        return empty, "times override file: %s, so nothing runs" % exc
     return {"weekdays": weekdays, "dates": dates}, None
 
 
@@ -473,16 +487,33 @@ def parse_times_target(which: str) -> tuple:
     raise ScheduleError("times set needs a weekday name or YYYY-MM-DD")
 
 
+def _refuse_weekend(kind: str, key: str) -> None:
+    """Weekends never run, so times set does not record them."""
+    if kind == "weekday" and key in ("saturday", "sunday"):
+        raise ScheduleError(key + " is a weekend, and weekends never run")
+    if kind == "date" and dt.date.fromisoformat(key).weekday() >= 5:
+        raise ScheduleError(key + " is a weekend, and weekends never run")
+
+
+def _in_window(value: dt.time, window, what: str) -> None:
+    start, end = window
+    if not (start <= value <= end):
+        raise ScheduleError("%s must be from %s to %s" % (what, hm(start), hm(end)))
+
+
 def set_times_override(path, which: str, alarm: str, leave: str) -> None:
     """Merge one weekday or one date into the times file. A bad existing file is left untouched."""
     kind, key = parse_times_target(which)
+    _refuse_weekend(kind, key)
     on = parse_hm(alarm, "alarm")
     off = parse_hm(leave, "leaveBy")
     if off <= on:
         raise ScheduleError("leaveBy is not after alarm")
+    _in_window(on, ALARM_WINDOW, "alarm")
+    _in_window(off, LEAVE_WINDOW, "leaveBy")
     current, problem = load_times_override(path)
     if problem:
-        raise ScheduleError(problem.replace("using schedule defaults", "not written"))
+        raise ScheduleError(problem.replace(", so nothing runs", "; not written"))
     slot = {"alarm": "%02d:%02d" % (on.hour, on.minute), "leaveBy": "%02d:%02d" % (off.hour, off.minute)}
     current["weekdays" if kind == "weekday" else "dates"][key] = slot
     save_times_override(path, current)
@@ -492,12 +523,17 @@ def _times_stderr(message: str, stamp: Optional[dt.datetime] = None) -> None:
     sys.stderr.write(message + "\n")
 
 
-def note_bad_times(problem: str, now: Optional[dt.datetime], log: Optional[Callable], alert_path) -> None:
-    """One alert for this day. write_alert itself writes nothing the second time."""
+def note_bad_times(problem: str, day: dt.date, now: Optional[dt.datetime], log: Optional[Callable],
+                   alert_path) -> None:
+    """One alert for the morning that will not run. write_alert writes nothing the second time.
+
+    `day` is that morning, not the clock's date. The evening sync passes tomorrow,
+    so the alert is written at 20:30 and the 6 AM tick finds it already there.
+    """
     when = now or clock()
     if when.tzinfo is None:
         when = when.replace(tzinfo=dt.timezone.utc)
-    write_alert(default_alert_path() if alert_path is None else alert_path, when.date(), "schedule", "times",
+    write_alert(default_alert_path() if alert_path is None else alert_path, day, "schedule", "times",
                 problem, when, log or _times_stderr)
 
 
@@ -523,22 +559,33 @@ def resolved_day_times(schedule: dict, day: dt.date, times_path=None, now: Optio
     """Alarm and leaveBy for one date. The only place those times are chosen.
 
     A date entry in the times file wins over that weekday's entry, which wins
-    over schedule.json. A missing file means the schedule. A bad file means the
-    schedule too, and one alert for the day (note_bad_times): the morning still
-    runs. Returns {"alarm", "leaveBy"} as datetime.time, or None when that
-    weekday has no schedule times and no usable override.
+    over schedule.json. A missing file means the schedule. A file that exists
+    but will not parse or fails validation raises TimesError after one alert
+    (note_bad_times): nothing runs that day. Returns {"alarm", "leaveBy"} as
+    datetime.time, or None when that weekday has no schedule times and no
+    usable override.
     """
     path = Path(times_path) if times_path is not None else default_times_path()
     override, problem = load_times_override(path)
-    picked = None
     if problem:
-        note_bad_times(problem, now, log, alert_path)
-    else:
-        picked = override["dates"].get(day.isoformat()) or override["weekdays"].get(DAY_KEYS[day.weekday()])
+        note_bad_times(problem, day, now, log, alert_path)
+        raise TimesError(problem)
+    picked = override["dates"].get(day.isoformat()) or override["weekdays"].get(DAY_KEYS[day.weekday()])
     if picked:
         return {"alarm": parse_hm(picked["alarm"], "times alarm"),
                 "leaveBy": parse_hm(picked["leaveBy"], "times leaveBy")}
     return schedule_day_times(schedule, day)
+
+
+def board_url(alarm: Optional[dt.time] = None, leave: Optional[dt.time] = None) -> str:
+    """The kiosk address. With both times, the query is that day's alarm and leaveBy.
+
+    The page uses those when they are present and schedule.json when they are not.
+    """
+    if alarm is None or leave is None:
+        return BOARD_URL
+    query = urllib.parse.urlencode({"alarm": hm(alarm), "leaveBy": hm(leave)}, safe=":")
+    return BOARD_URL + "?" + query
 
 
 def render_times(schedule: dict, start: dt.date, times_path=None, now: Optional[dt.datetime] = None,
@@ -546,7 +593,10 @@ def render_times(schedule: dict, start: dt.date, times_path=None, now: Optional[
     """The next 7 days, then every saved date override."""
     path = Path(times_path) if times_path is not None else default_times_path()
     data, problem = load_times_override(path)
-    lines = [problem] if problem else []
+    if problem:
+        note_bad_times(problem, start, now, log, alert_path)
+        return problem
+    lines = []
     for offset in range(7):
         day = start + dt.timedelta(days=offset)
         times = resolved_day_times(schedule, day, path, now, log, alert_path)
@@ -590,10 +640,11 @@ def is_run_day(schedule: dict, day: dt.date, skip_path=None, run_days_path=None,
          the date. Its errors raise RunDaysError: nothing runs, one error is logged.
     The skip list wins over a run of true. The run-days file is only read for a
     weekday the schedule has on, so a weekend (or any weekday left off) raises
-    nothing. Saturday and Sunday stay off in schedule.json on purpose: the
-    run-days file only marks no_school, so a weekend it does not mark must not
-    run. On and off times come from resolved_day_times, so plan_for calls this
-    and that, and nothing else decides a run day.
+    nothing. Saturday and Sunday stay off in schedule.json. The run-days file
+    sets run from kids_home (a Dad's House event covering 6:00 AM) and not
+    no_school; a weekend stays off here even when that flag is true. On and off
+    times come from resolved_day_times, so plan_for calls this and that, and
+    nothing else decides a run day.
     """
     skipped = day in load_skip_dates(skip_path or default_skip_path())
     entry = schedule["days"].get(DAY_KEYS[day.weekday()])
@@ -1222,12 +1273,12 @@ class Tv:
         """None when the cast went out, else why not (scrubbed)."""
         if not catt:
             try:
-                cast_site(self._ip, BOARD_URL)
+                cast_site(self._ip, cast_board_url)
             except (TvError, OSError) as exc:
                 return self._scrub(describe_error(exc))
             return None
         try:
-            done = subprocess.run([catt, "-d", self._ip, "cast_site", BOARD_URL], stdin=subprocess.DEVNULL,
+            done = subprocess.run([catt, "-d", self._ip, "cast_site", cast_board_url], stdin=subprocess.DEVNULL,
                                   capture_output=True, text=True, timeout=60)
         except (OSError, subprocess.TimeoutExpired) as exc:
             return self._scrub(describe_error(exc))
@@ -1518,47 +1569,57 @@ def tick(schedule: dict, now: dt.datetime, state_path, actions: Dict[str, Callab
         else:
             report_error_once(message, day, error_marker, log)
 
-    plan = plan_for(schedule, day, now, log=log, alert_path=alert_path)
-    if plan is None:
-        return 0
-    on_at = dt.datetime.combine(day, plan["on"], tzinfo=now.tzinfo)
-    off_at = dt.datetime.combine(day, plan["off"], tzinfo=now.tzinfo)
-    state, corrupt = load_state(state_path, day)
-    failures = 0
+    global cast_board_url
+    previous_url = cast_board_url
+    cast_board_url = BOARD_URL
     try:
-        if corrupt and not dry_run:
-            save_state(state_path, state)  # so today is marked acted, and tomorrow recovers
-            state_error("state file is unreadable, so nothing is sent today")
-        for name in TVS:
-            st = state["tvs"].setdefault(name, {})
-            step = decide(on_at, off_at, now, st)
-            if step is None:
-                continue
-            if step == "skip_on":
+        try:
+            plan = plan_for(schedule, day, now, log=log, alert_path=alert_path)
+        except TimesError:
+            return 1  # note_bad_times already alerted once; no TV
+        if plan is None:
+            return 0
+        cast_board_url = board_url(plan["on"], plan["off"])
+        on_at = dt.datetime.combine(day, plan["on"], tzinfo=now.tzinfo)
+        off_at = dt.datetime.combine(day, plan["off"], tzinfo=now.tzinfo)
+        state, corrupt = load_state(state_path, day)
+        failures = 0
+        try:
+            if corrupt and not dry_run:
+                save_state(state_path, state)  # so today is marked acted, and tomorrow recovers
+                state_error("state file is unreadable, so nothing is sent today")
+            for name in TVS:
+                st = state["tvs"].setdefault(name, {})
+                step = decide(on_at, off_at, now, st)
+                if step is None:
+                    continue
+                if step == "skip_on":
+                    if dry_run:
+                        print("%s: would skip power-on, %d minutes or more past alarm" % (name, ON_GRACE.seconds // 60))
+                        continue
+                    st["on_skipped"] = now.isoformat()
+                    save_state(state_path, state)
+                    log("%s: power-on skipped, %d minutes or more past alarm" % (name, ON_GRACE.seconds // 60))
+                    continue
                 if dry_run:
-                    print("%s: would skip power-on, %d minutes or more past alarm" % (name, ON_GRACE.seconds // 60))
+                    print("%s: would %s" % (name, step))
                     continue
-                st["on_skipped"] = now.isoformat()
-                save_state(state_path, state)
-                log("%s: power-on skipped, %d minutes or more past alarm" % (name, ON_GRACE.seconds // 60))
-                continue
-            if dry_run:
-                print("%s: would %s" % (name, step))
-                continue
-            with tv_lock(Path(state_path).parent, name) as held:
-                if not held:
-                    log("%s: another kids-tv command is using this TV; %s skipped this tick" % (name, step))
-                    continue
-                if not attempt(name, step, st, now, state_path, state, actions, log, alert_path):
-                    failures += 1
-                elif step == "on":
-                    # Power-on went out, so cast now in the same run; a miss retries next tick.
-                    if not attempt(name, "cast", st, now, state_path, state, actions, log, alert_path):
+                with tv_lock(Path(state_path).parent, name) as held:
+                    if not held:
+                        log("%s: another kids-tv command is using this TV; %s skipped this tick" % (name, step))
+                        continue
+                    if not attempt(name, step, st, now, state_path, state, actions, log, alert_path):
                         failures += 1
-    except StateError as exc:
-        state_error("%s, so nothing more is sent today" % exc)
-        return failures + 1
-    return failures
+                    elif step == "on":
+                        # Power-on went out, so cast now in the same run; a miss retries next tick.
+                        if not attempt(name, "cast", st, now, state_path, state, actions, log, alert_path):
+                            failures += 1
+        except StateError as exc:
+            state_error("%s, so nothing more is sent today" % exc)
+            return failures + 1
+        return failures
+    finally:
+        cast_board_url = previous_url
 
 
 def error_marker_path(args) -> Path:
@@ -1961,7 +2022,8 @@ def sonos_tick(schedule: dict, now: dt.datetime, state_path, alert_path, log: Ca
     run-days file and skip list), off if not. If
     tomorrow cannot be decided (for example the run-days file is stale), the
     alarm is left as it is and retried each tick until SONOS_SYNC_GIVE_UP,
-    then an alert is written. A failed sync is retried on later ticks, up to
+    then an alert is written. A times file that exists but cannot be trusted
+    is not that path: one alert for tomorrow, and the alarm stays unchanged. A failed sync is retried on later ticks, up to
     MAX_ATTEMPTS, with an alert on the first failure.
     """
     if not sonos_config:
@@ -2040,7 +2102,21 @@ def sonos_evening_sync(schedule, now, state, state_path, alert_path, log, dry_ru
     day = now.date()
     tomorrow = day + dt.timedelta(days=1)
     try:
+        # Same check as the morning. A bad times file alerts now, for tomorrow,
+        # and the alarm is left unchanged. A later tick retries if the file is fixed.
+        resolved_day_times(schedule, tomorrow, now=now, log=log, alert_path=alert_path)
+    except TimesError as exc:
+        for key in pending:
+            if dry_run:
+                print("%s: would leave the Sonos alarm unchanged: %s" % (key, exc))
+        return 0
+    try:
         plan = plan_for(schedule, tomorrow, now, log=log, alert_path=alert_path)
+    except TimesError as exc:
+        for key in pending:
+            if dry_run:
+                print("%s: would leave the Sonos alarm unchanged: %s" % (key, exc))
+        return 0
     except ScheduleError as exc:
         give_up = now.time() >= SONOS_SYNC_GIVE_UP
         for key in pending:
@@ -2256,6 +2332,7 @@ def make_actions(args, log: Callable) -> Dict[str, Callable]:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    global cast_board_url
     args = build_parser().parse_args(argv)
     log = Log(args.log)
     if args.run_days:
@@ -2319,43 +2396,56 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.cmd == "alerts":
             return alerts_command(args.alert or default_alert_path(), args.ack, args.ack_all, args.all,
                                   args.json, dt.datetime.now().astimezone())
-        actions = make_actions(args, log)
-        names = list(TVS) if args.tv == "all" else [args.tv]
-        steps = ["on", "cast"] if args.cmd == "on" else [args.cmd]
-        if args.dry_run:
-            for name in names:
-                for step in steps:
-                    print("%s: would %s%s" % (name, step, " " + BOARD_URL if step == "cast" else ""))
-            return 0
-        failed = []
-        for name in names:  # a TV that fails never stops the next one
-            try:
-                with tv_lock(Path(args.state).parent, name, LOCK_WAIT_SECONDS) as held:
-                    if not held:
-                        failed.append(name)
-                        message = "%s: another kids-tv command kept this TV busy for %d s; manual %s not sent" % (
-                            name, LOCK_WAIT_SECONDS, args.cmd)
-                        log("ERROR: " + message)
-                        sys.stderr.write("ERROR: %s\n" % message)
-                        continue
+        previous_url = cast_board_url
+        try:
+            if args.cmd in ("on", "cast", "castcheck"):
+                schedule = load_schedule(schedule_path)
+                now = dt.datetime.now(schedule_zone(schedule))
+                try:
+                    plan = plan_for(schedule, now.date(), now, log=log,
+                                    alert_path=args.alert or default_alert_path())
+                except ScheduleError:
+                    plan = None  # no resolved times: the page falls back to schedule.json
+                cast_board_url = board_url(plan["on"], plan["off"]) if plan else BOARD_URL
+            actions = make_actions(args, log)
+            names = list(TVS) if args.tv == "all" else [args.tv]
+            steps = ["on", "cast"] if args.cmd == "on" else [args.cmd]
+            if args.dry_run:
+                for name in names:
                     for step in steps:
-                        try:
-                            actions[step](name)
-                        except TvError as exc:
+                        print("%s: would %s%s" % (name, step, " " + cast_board_url if step == "cast" else ""))
+                return 0
+            failed = []
+            for name in names:  # a TV that fails never stops the next one
+                try:
+                    with tv_lock(Path(args.state).parent, name, LOCK_WAIT_SECONDS) as held:
+                        if not held:
                             failed.append(name)
-                            if not isinstance(exc, OffDidNotStick):  # power_off_verified already logged that one
-                                log("ERROR: %s" % exc)
-                            sys.stderr.write("ERROR: %s\n" % exc)
-                            break
-                        if step not in ("status", "info"):
-                            log("%s: manual %s sent" % (name, step))
-                            print("%s: %s sent" % (name, step))
-            except StateError as exc:  # this TV's lock file cannot be opened: skip it, go on to the next
-                failed.append(name)
-                message = "%s: %s; manual %s not sent" % (name, exc, args.cmd)
-                log("ERROR: " + message)
-                sys.stderr.write("ERROR: %s\n" % message)
-        return 1 if failed else 0
+                            message = "%s: another kids-tv command kept this TV busy for %d s; manual %s not sent" % (
+                                name, LOCK_WAIT_SECONDS, args.cmd)
+                            log("ERROR: " + message)
+                            sys.stderr.write("ERROR: %s\n" % message)
+                            continue
+                        for step in steps:
+                            try:
+                                actions[step](name)
+                            except TvError as exc:
+                                failed.append(name)
+                                if not isinstance(exc, OffDidNotStick):  # power_off_verified already logged that one
+                                    log("ERROR: %s" % exc)
+                                sys.stderr.write("ERROR: %s\n" % exc)
+                                break
+                            if step not in ("status", "info"):
+                                log("%s: manual %s sent" % (name, step))
+                                print("%s: %s sent" % (name, step))
+                except StateError as exc:  # this TV's lock file cannot be opened: skip it, go on to the next
+                    failed.append(name)
+                    message = "%s: %s; manual %s not sent" % (name, exc, args.cmd)
+                    log("ERROR: " + message)
+                    sys.stderr.write("ERROR: %s\n" % message)
+            return 1 if failed else 0
+        finally:
+            cast_board_url = previous_url
     except (ScheduleError, TvError, ValueError, StateError) as exc:  # StateError: a last guard, no traceback
         if args.cmd == "tick":
             report_error_once(str(exc), error_day, error_marker_path(args), log)
