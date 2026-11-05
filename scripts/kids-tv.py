@@ -130,9 +130,10 @@ run_days_path_from_config: Optional[str] = None  # set from the local config by 
 MAX_ATTEMPTS = 4  # per TV, per step, per day
 ON_GRACE = dt.timedelta(minutes=15)  # a power-on this long or longer after alarm is skipped
 OFF_GRACE = dt.timedelta(minutes=20)  # a power-off this long or longer after on-the-road is skipped
-# The on check is due this long after alarm, so the alarm tick has turned the
-# TVs on and cast. Not a clock time; the day's alarm comes from resolved_day_times.
-ON_CHECK_AFTER = dt.timedelta(minutes=5)
+# The on check is due this long after alarm. Power-on retries run for about
+# four minutes and cast retries until about seven, so the check waits until
+# both have finished. Not a clock time; the day's alarm comes from resolved_day_times.
+ON_CHECK_AFTER = dt.timedelta(minutes=10)
 CAST_SETTLE_SECONDS = 4
 CAST_TRIES = 6
 CAST_RETRY_SECONDS = 3
@@ -2365,6 +2366,21 @@ def _problem_line(message: str) -> bool:
             or "local network" in lowered)
 
 
+def _failure_recovered(message: str, later) -> bool:
+    """A retry line is not a failure once that TV's step has succeeded.
+
+    The job logs URLError and "No route to host" while it is still trying.
+    The final "power on sent" or "cast sent" line is the result.
+    """
+    match = re.match(r"ALERT: ([^:]+): ([a-z-]+):", message)
+    if not (match and match.group(1) in TVS and match.group(2) in SENT_TEXT):
+        match = re.match(r"([^:]+): (on|cast|off) failed\b", message)
+        if not (match and match.group(1) in TVS):
+            return False
+    phrase = "%s: %s" % (match.group(1), SENT_TEXT[match.group(2)])
+    return any(row[1] == phrase for row in later)
+
+
 def _times_alert_line(message: str) -> bool:
     """The one alert resolved_day_times already sent for a broken times file."""
     lowered = message.lower()
@@ -2552,23 +2568,30 @@ def _boot_time(override, zone):
     return None
 
 
-def _common_findings(now, zone, args, ignore_times_alert: bool = False) -> tuple:
-    """Findings that apply to every check that actually runs. (problems, evidence)."""
+def _common_findings(now, zone, args, ignore_times_alert: bool = False, fresh_log: bool = True) -> tuple:
+    """Findings that apply to every check that actually runs. (problems, evidence).
+
+    fresh_log is the on check only. The off check and the evening check read a
+    result the job wrote when it acted (the off, or the 20:30 sync), which is
+    often more than 10 minutes before the check.
+    """
     problems, evidence = [], []
     lines = read_stamp_lines(args.log, zone)
     if not lines:
         problems.append("the morning-board log has not been written")
     else:
         newest = max(lines, key=lambda row: row[0])
-        if now - newest[0] > HEALTH_LOG_FRESH:
+        if fresh_log and now - newest[0] > HEALTH_LOG_FRESH:
             problems.append("the morning-board log was last written at %s, which is more than 10 minutes ago"
                             % newest[0].strftime("%H:%M"))
             evidence.append(newest[2])
         flagged = 0
-        for stamp, message, raw in lines:
+        for index, (stamp, message, raw) in enumerate(lines):
             if ignore_times_alert and _times_alert_line(message):
                 continue
             if stamp < now - HEALTH_PROBLEM_WINDOW or stamp > now or not _problem_line(message):
+                continue
+            if _failure_recovered(message, lines[index + 1:]):
                 continue
             flagged += 1
             if flagged <= 20:
@@ -2651,15 +2674,15 @@ def _evaluate_slot(slot: str, now, schedule, lines, state, sonos_state, broken: 
             missing = [key for key in TVS if key not in sonos_config["rooms"]]
             if missing:
                 problems.append("Sonos config has no " + ", ".join(missing))
-            for key, room in sonos_config["rooms"].items():
+            for key in sonos_config["rooms"]:
                 found = _sonos_morning_evidence(lines, sonos_state, day, key)
                 if not found:
-                    problems.append("%s alarm did not fire and Play was not sent" % room["room"])
+                    problems.append("%s alarm did not fire and Play was not sent" % key)
                 else:
                     evidence.append(found)
             if problems:
                 return problems, evidence, ""
-            names = " and ".join(room["room"] for room in sonos_config["rooms"].values())
+            names = " and ".join(sonos_config["rooms"])
             return problems, evidence, "Both TVs turned on and cast, and %s fired or were sent Play." % names
         evidence.append("Sonos is off, so the alarms were not checked.")
         return problems, evidence, "" if problems else "Both TVs turned on and cast."
@@ -2693,22 +2716,22 @@ def _evaluate_slot(slot: str, now, schedule, lines, state, sonos_state, broken: 
             alarm_time = times["alarm"] if times else None
             if alarm_time is None:
                 problems.append("%s is a run day but has no alarm time" % tomorrow.isoformat())
-        for key, room in sonos_config["rooms"].items():
+        for key in sonos_config["rooms"]:
             if tomorrow_error:
                 break
             result, raw = _sync_result(lines, sonos_state, day, tomorrow, key)
             if result is None:
-                problems.append("%s alarm was not synced tonight" % room["room"])
+                problems.append("%s alarm was not synced tonight" % key)
                 continue
             if not _sync_matches(result, alarm_time, tomorrow):
                 wanted = "off" if alarm_time is None else "on %s ON_%s" % (
                     alarm_time.strftime("%H:%M"), sonos_day(tomorrow))
-                problems.append("%s alarm for %s is %s, wanted %s" % (room["room"], tomorrow.isoformat(), result, wanted))
+                problems.append("%s alarm for %s is %s, wanted %s" % (key, tomorrow.isoformat(), result, wanted))
             evidence.append(raw)
     if not problems and broken:
         reason = BROKEN_TIMES_REASON
     elif not problems and sonos_config:
-        names = " and ".join(room["room"] for room in sonos_config["rooms"].values())
+        names = " and ".join(sonos_config["rooms"])
         reason = "Tonight's sync set %s for %s." % (names, tomorrow.isoformat())
     elif not problems:
         reason = "Evening check found nothing to flag."
@@ -2785,7 +2808,10 @@ def _healthcheck_run(args, log) -> int:
     state = _json_object(args.state)
     sonos_state = _json_object(sonos_state_path(args))
     alert_path = args.alert or default_alert_path()
-    problems, evidence = _common_findings(now, zone, args, ignore_times_alert=broken)
+    # Only the on check expects a log line in the last 10 minutes. Off and evening
+    # read the line the job wrote when it acted, which is earlier than the check.
+    problems, evidence = _common_findings(
+        now, zone, args, ignore_times_alert=broken, fresh_log=slots == ["morning-on"])
     reasons = []
     for slot in slots:
         slot_problems, slot_evidence, reason = _evaluate_slot(
@@ -2802,6 +2828,11 @@ def _healthcheck_run(args, log) -> int:
         pending = []
     for item in pending:
         if broken and item.get("tv") == "schedule" and item.get("step") == "times":
+            continue
+        # A first-try alert for a step that later succeeded is not the result.
+        # Leave it in the alert file for the other check. Do not ack it here.
+        if item.get("tv") in TVS and item.get("step") in SENT_TEXT and _tv_evidence(
+                lines, state, now.date(), item["tv"], item["step"]):
             continue
         alert_ids.append(alert_id(item))
         problems.append("unacknowledged alert %s: %s" % (alert_id(item), item.get("error")))
@@ -2858,8 +2889,6 @@ def _healthcheck_run(args, log) -> int:
     tmp = sent_path.with_suffix(".tmp")
     tmp.write_text(json.dumps({"fingerprint": fingerprint, "at": payload["at"]}, indent=1) + "\n", encoding="utf-8")
     os.replace(tmp, sent_path)
-    if alert_ids:
-        alerts_command(alert_path, alert_ids, False, False, False, now)
     return 1
 
 

@@ -3073,8 +3073,8 @@ class HealthcheckTests(unittest.TestCase):
         self.config.write_text(json.dumps({"sonos": {
             "backup": str(self.dir / "backup.json"),
             "rooms": {
-                "boys-room": {"room": "Room One", "ip": "10.9.8.7", "alarm_id": "11"},
-                "girls-room": {"room": "Room Two", "ip": "10.9.8.8", "alarm_id": "12"},
+                "boys-room": {"room": "Not A Real Room", "ip": "10.9.8.7", "alarm_id": "11"},
+                "girls-room": {"room": "Not A Real Room Two", "ip": "10.9.8.8", "alarm_id": "12"},
             }}}))
 
     def invoke(self, slot, now, urlopen=None, extra=()):
@@ -3101,6 +3101,7 @@ class HealthcheckTests(unittest.TestCase):
         self.assertNotIn("SECRETTOKEN", blob)
         self.assertNotIn("10.9.8.7", blob)
         self.assertNotIn("10.1.2.3", blob)
+        self.assertNotIn("Not A Real Room", blob)
         status = json.loads(self.status.read_text(encoding="utf-8")) if self.status.exists() else None
         return rc, out.getvalue(), status
 
@@ -3122,8 +3123,8 @@ class HealthcheckTests(unittest.TestCase):
         self.assertEqual(kt.morning_slots_due(monday_730, sched, ["morning-on"]), ["morning-off"])
         self.assertNotIn("morning-off", kt.morning_slots_due(
             dt.datetime(2026, 10, 26, 7, 29, tzinfo=LA), sched, []))
-        self.assertEqual(kt.morning_slots_due(dt.datetime(2026, 10, 26, 6, 4, tzinfo=LA), sched, []), [])
-        self.assertEqual(kt.morning_slots_due(dt.datetime(2026, 10, 26, 6, 5, tzinfo=LA), sched, []), ["morning-on"])
+        self.assertEqual(kt.morning_slots_due(dt.datetime(2026, 10, 26, 6, 9, tzinfo=LA), sched, []), [])
+        self.assertEqual(kt.morning_slots_due(dt.datetime(2026, 10, 26, 6, 10, tzinfo=LA), sched, []), ["morning-on"])
         self.write_run_days(monday_730, run=False)
         self.assertEqual(kt.morning_slots_due(monday_730, sched, []), [])
 
@@ -3239,8 +3240,8 @@ class HealthcheckTests(unittest.TestCase):
                        "2026-10-29 06:19:01 girls-room: cast sent")
         rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00")
         self.assertEqual(status["result"], "pass")
-        self.assertIn("Room One", status["reason"])
-        self.assertIn("Room Two", status["reason"])
+        self.assertIn("boys-room", status["reason"])
+        self.assertIn("girls-room", status["reason"])
         self.write_log("2026-10-29 06:18:00 boys-room: power on sent",
                        "2026-10-29 06:19:00 boys-room: cast sent",
                        "2026-10-29 06:19:01 girls-room: cast sent")
@@ -3309,8 +3310,8 @@ class HealthcheckTests(unittest.TestCase):
             "2026-10-29 20:44:00 boys-room: cast sent")
         rc, _out, status = self.invoke("evening", "2026-10-29T20:45:00")
         self.assertEqual((rc, status["result"]), (0, "pass"))
-        self.assertIn("Room One", status["reason"])
-        self.assertIn("Room Two", status["reason"])
+        self.assertIn("boys-room", status["reason"])
+        self.assertIn("girls-room", status["reason"])
         self.write_log(
             "2026-10-29 20:40:00 boys-room: sonos alarm for 2026-10-30: already on 06:00 ON_5",
             "2026-10-29 20:40:01 girls-room: sonos alarm for 2026-10-30: already off",
@@ -3328,6 +3329,93 @@ class HealthcheckTests(unittest.TestCase):
         rc, _out, status = self.invoke("evening", "2026-10-31T20:45:00")
         self.assertEqual((rc, status["result"]), (0, "pass"))
         self.assertIn("not a run day", " ".join(status["evidence"]))
+
+    def test_clean_off_and_evening_do_not_need_a_log_from_the_last_10_minutes(self):
+        self.write_run_days(dt.datetime(2026, 10, 26, 7, 30, tzinfo=LA))
+        self.write_net("2026-10-26 07:00:00 6 targets ok")
+        self.write_log("2026-10-26 07:14:00 boys-room: power off sent",
+                       "2026-10-26 07:14:01 girls-room: power off sent")
+        rc, _out, status = self.invoke("morning-off", "2026-10-26T07:30:00")
+        self.assertEqual((rc, status["result"]), (0, "pass"))
+        self.assertNotIn("10 minutes", status["reason"])
+        self.sonos()
+        for day, tomorrow, recurrence in (("2026-11-02", "2026-11-03", "ON_2"),
+                                          ("2026-11-03", "2026-11-04", "ON_3")):
+            when = dt.datetime.fromisoformat(day + "T20:45:00").replace(tzinfo=LA)
+            self.write_run_days(when)
+            self.write_net(day + " 20:00:00 6 targets ok")
+            self.write_log(
+                "%s 20:30:00 boys-room: sonos alarm for %s: already on 06:00 %s" % (day, tomorrow, recurrence),
+                "%s 20:30:01 girls-room: sonos alarm for %s: already on 06:00 %s" % (day, tomorrow, recurrence))
+            rc, _out, status = self.invoke("evening", day + "T20:45:00")
+            self.assertEqual((rc, status["result"]), (0, "pass"), status)
+            self.assertNotIn("10 minutes", status["reason"])
+
+    def test_a_retry_that_recovers_passes_the_on_check(self):
+        when = dt.datetime(2026, 10, 29, 6, 10, tzinfo=LA)
+        self.write_run_days(when)
+        self.write_net("2026-10-29 06:00:00 6 targets ok")
+        self.write_log(
+            "2026-10-29 06:00:30 boys-room: on failed, TV not answering, maybe restarting; "
+            "retrying for up to 4 min: URLError(OSError): [Errno 65] No route to host",
+            "2026-10-29 06:00:31 girls-room: power on sent",
+            "2026-10-29 06:03:39 boys-room: power on sent",
+            "2026-10-29 06:04:10 boys-room: cast failed, try 1 of 4: URLError(OSError): timed out",
+            "2026-10-29 06:04:11 ALERT: boys-room: cast: first try failed: URLError(OSError): timed out",
+            "2026-10-29 06:06:55 boys-room: cast sent",
+            "2026-10-29 06:06:56 girls-room: cast sent")
+        self.alert.write_text(json.dumps({"alerts": [{
+            "date": "2026-10-29", "tv": "boys-room", "step": "cast",
+            "error": "first try failed: URLError(OSError): timed out",
+            "at": "2026-10-29T06:04:11-07:00"}]}))
+        self.assertEqual(kt.morning_slots_due(when, kt.load_schedule(ROOT / "schedule.json"), []), ["morning-on"])
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:10:00")
+        self.assertEqual((rc, status["result"]), (0, "pass"), status)
+        self.assertNotIn("URLError", status["reason"])
+        self.assertFalse((self.dir / "kids-tv-alert-ack.json").exists())
+
+    def test_configured_room_name_never_appears_in_status_or_payload(self):
+        self.sonos()
+        self.write_run_days(dt.datetime(2026, 10, 29, 6, 10, tzinfo=LA))
+        self.write_net("2026-10-29 06:00:00 6 targets ok")
+        self.write_log("2026-10-29 06:08:00 boys-room: power on sent",
+                       "2026-10-29 06:08:01 girls-room: power on sent",
+                       "2026-10-29 06:08:02 boys-room: sonos playing after alarm",
+                       "2026-10-29 06:08:03 girls-room: sonos playing after alarm",
+                       "2026-10-29 06:08:04 boys-room: cast sent",
+                       "2026-10-29 06:08:05 girls-room: cast sent")
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:10:00")
+        self.assertEqual((rc, status["result"]), (0, "pass"))
+        self.assertIn("boys-room and girls-room", status["reason"])
+        self.webhook.write_text("WEBHOOK_URL=https://alerts.example.test/hook\n")
+        os.chmod(self.webhook, 0o600)
+        posted = []
+
+        class Resp:
+            def read(self):
+                return b""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+        def urlopen(request, timeout=10):
+            posted.append(json.loads(request.data.decode("utf-8")))
+            return Resp()
+
+        self.write_log("2026-10-29 06:08:00 boys-room: power on sent",
+                       "2026-10-29 06:08:01 girls-room: power on sent",
+                       "2026-10-29 06:08:04 boys-room: cast sent",
+                       "2026-10-29 06:08:05 girls-room: cast sent")
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:10:00", urlopen=urlopen)
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(posted), 1)
+        body = json.dumps(posted[0]) + json.dumps(status)
+        self.assertNotIn("Not A Real Room", body)
+        self.assertIn("boys-room", body)
+        self.assertFalse((self.dir / "kids-tv-alert-ack.json").exists())
 
     def test_six_target_netcheck_is_healthy_without_sonos(self):
         self.write_run_days(dt.datetime(2026, 10, 29, 6, 20, tzinfo=LA))
@@ -3378,18 +3466,13 @@ class HealthcheckTests(unittest.TestCase):
         self.alert.write_text(json.dumps({"alerts": [
             {"date": "2026-10-29", "tv": "boys-room", "step": "on", "error": "boom",
              "at": "2026-10-29T06:00:00-07:00"}]}))
-        seen = []
-        original_ack = kt.alerts_command
-
-        def record_ack(path, ack, ack_all, show_all, as_json, now):
-            seen.append((list(ack), ack_all))
-            return original_ack(path, ack, ack_all, show_all, as_json, now)
-
-        with mock.patch.object(kt, "alerts_command", side_effect=record_ack):
-            rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00", urlopen=urlopen)
-        self.assertEqual(seen, [(["2026-10-29/boys-room/on"], False)])
-        acked = json.loads((self.dir / "kids-tv-alert-ack.json").read_text(encoding="utf-8"))
-        self.assertIn("2026-10-29/boys-room/on", acked["acked"])
+        ack_path = self.dir / "kids-tv-alert-ack.json"
+        ack_path.write_text('{"acked": {"leave-this": "2026-10-29T00:00:00-07:00"}}\n')
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00", urlopen=urlopen)
+        self.assertIn("2026-10-29/boys-room/on", status["reason"])
+        self.assertEqual(len(posted), 3)
+        self.assertEqual(json.loads(ack_path.read_text(encoding="utf-8"))["acked"],
+                         {"leave-this": "2026-10-29T00:00:00-07:00"})
 
         def boom(request, timeout=10):
             raise urllib.error.URLError("down")
@@ -3397,7 +3480,7 @@ class HealthcheckTests(unittest.TestCase):
         self.alert.write_text(json.dumps({"alerts": [
             {"date": "2026-10-29", "tv": "girls-room", "step": "cast", "error": "boom",
              "at": "2026-10-29T06:05:00-07:00"}]}))
-        (self.dir / "kids-tv-alert-ack.json").unlink()
+        ack_path.unlink()
         sent = self.status.parent / (self.status.stem + "-sent.json")
         if sent.exists():
             sent.unlink()
