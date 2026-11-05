@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Evening healthcheck, 8:45 PM local time every day. User LaunchAgent for
+  ~/Library/LaunchAgents/. Replace __REPO__ and __HOME__. No sudo.
+  `kids-tv.py healthcheck` with the evening slot reads logs and state only. It does
+  not talk to a TV or a speaker. Morning checks are the other healthcheck
+  plist, which decides its own times from the schedule.
+  Do not load this until asked. See README, "Health check".
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.davidcasas.morningboard.kids-tv-healthcheck-evening.plist
+  Stop it with:
+    launchctl bootout gui/$(id -u)/com.davidcasas.morningboard.kids-tv-healthcheck-evening
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.davidcasas.morningboard.kids-tv-healthcheck-evening</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__REPO__/scripts/kids-tv.py</string>
+    <string>healthcheck</string>
+    <string>--slot</string>
+    <string>evening</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>20</integer>
+    <key>Minute</key>
+    <integer>45</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/kids-tv-healthcheck-evening.out</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/kids-tv-healthcheck-evening.err</string>
+</dict>
+</plist>

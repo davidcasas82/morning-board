@@ -2696,6 +2696,15 @@ class NetcheckTests(unittest.TestCase):
         self.assertEqual(self.run_check(lambda h, p: "ok"), 0)
         self.assertEqual(self.alerts(), [])
         self.assertTrue(self.logs[0].startswith("netcheck: boys-room cast:8009 ok"))
+        self.assertEqual(self.logs[-1], "4 targets ok")
+
+    def test_eight_ok_targets_log_eight_targets_ok(self):
+        self.targets = [("boys-room", "cast", "h", 8009), ("boys-room", "cast-info", "h", 8008),
+                        ("boys-room", "smartcast", "h", 7345), ("girls-room", "cast", "h", 8009),
+                        ("girls-room", "cast-info", "h", 8008), ("girls-room", "smartcast", "h", 7345),
+                        ("boys-room", "sonos", "h2", 1400), ("girls-room", "sonos", "h3", 1400)]
+        self.assertEqual(self.run_check(lambda h, p: "ok"), 0)
+        self.assertEqual(self.logs[-1], "8 targets ok")
 
     def test_every_connection_no_route_is_the_local_network_permission(self):
         self.assertEqual(self.run_check(lambda h, p: "no route"), 4)
@@ -3003,6 +3012,418 @@ class NetcheckTargetsTests(unittest.TestCase):
         self.assertEqual([(a["tv"], a["step"]) for a in alerts], [("girls-room", "netcheck")])
         self.assertIn("config not checked", alerts[0]["error"])
         self.assertNotIn("t0ken", alert.read_text() + "".join(logs))
+
+
+class HealthcheckTests(unittest.TestCase):
+    """Fixture logs and state only. Nothing under the real home, and no network."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self._env = {key: os.environ.get(key) for key in (
+            "KIDS_TV_SKIP", "KIDS_TV_CONFIG", "KIDS_TV_RUN_DAYS", "KIDS_TV_ALERT",
+            "KIDS_TV_TIMES", "KIDS_TV_SCHEDULE")}
+        self.log = self.dir / "kids-tv-morning-board.log"
+        self.net = self.dir / "kids-tv-helper-netcheck.log"
+        self.state = self.dir / "kids-tv-state.json"
+        self.alert = self.dir / "kids-tv-alert.json"
+        self.status = self.dir / "status.json"
+        self.ran = self.dir / "ran.json"
+        self.config = self.dir / "config.json"
+        self.config.write_text("{}\n")
+        self.plist = self.dir / "job.plist"
+        self.webhook = self.dir / "alert-webhook.env"
+        self.vizio = self.dir / "vizio"
+        self.vizio.mkdir()
+        (self.vizio / "boys-room.env").write_text(
+            "VIZIO_BOYS_ROOM_TOKEN=SECRETTOKEN\nVIZIO_BOYS_ROOM_IP=10.1.2.3\n")
+        self.boot = "2026-10-01T00:00:00"
+        self.write_plist(str(kt.HOME / "Applications/MorningBoardTVHelper.app/Contents/MacOS/kids-tv-helper"))
+        self.addCleanup(lambda: kt.apply_sonos_config(None))
+
+    def tearDown(self):
+        for key, value in self._env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def write_plist(self, program):
+        self.plist.write_bytes(plistlib.dumps({
+            "Label": "com.davidcasas.morningboard.kids-tv",
+            "ProgramArguments": [program, "scripts/kids-tv.py", "tick"],
+        }))
+
+    def write_run_days(self, now, run=True):
+        path = self.dir / "run-days.json"
+        days = every_day_runs(now.date() - dt.timedelta(days=1), 6)
+        if not run:
+            days[now.date().isoformat()] = False
+        path.write_text(json.dumps(run_days_doc((now - dt.timedelta(hours=1)).isoformat(), days)))
+        return path
+
+    def write_log(self, *rows):
+        self.log.write_text("".join(row if row.endswith("\n") else row + "\n" for row in rows), encoding="utf-8")
+
+    def write_net(self, line):
+        self.net.write_text(line if line.endswith("\n") else line + "\n", encoding="utf-8")
+
+    def sonos(self):
+        self.config.write_text(json.dumps({"sonos": {
+            "backup": str(self.dir / "backup.json"),
+            "rooms": {
+                "boys-room": {"room": "Daniel's Room", "ip": "10.9.8.7", "alarm_id": "11"},
+                "girls-room": {"room": "Girl's Room", "ip": "10.9.8.8", "alarm_id": "12"},
+            }}}))
+
+    def invoke(self, slot, now, urlopen=None, extra=()):
+        args = ["--config", str(self.config), "--config-dir", str(self.vizio),
+                "--log", str(self.log), "--state", str(self.state), "--alert", str(self.alert),
+                "--run-days", str(self.dir / "run-days.json"),
+                "healthcheck", "--now", now, "--status", str(self.status), "--ran", str(self.ran),
+                "--webhook", str(self.webhook), "--netcheck-log", str(self.net),
+                "--job-plist", str(self.plist), "--boot", self.boot]
+        if slot:
+            args.extend(["--slot", slot])
+        args[:0] = list(extra)
+        out, err = io.StringIO(), io.StringIO()
+
+        def refuse(*_a, **_k):
+            raise AssertionError("network")
+
+        opener = urlopen or refuse
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err), \
+                mock.patch("urllib.request.urlopen", opener), \
+                mock.patch.object(kt.socket, "create_connection", side_effect=AssertionError("tv")):
+            rc = kt.main(args)
+        blob = out.getvalue() + err.getvalue() + (self.status.read_text(encoding="utf-8") if self.status.exists() else "")
+        self.assertNotIn("SECRETTOKEN", blob)
+        self.assertNotIn("10.9.8.7", blob)
+        self.assertNotIn("10.1.2.3", blob)
+        status = json.loads(self.status.read_text(encoding="utf-8")) if self.status.exists() else None
+        return rc, out.getvalue(), status
+
+    def test_defaults_stay_under_the_patched_home(self):
+        args = kt.build_parser().parse_args(["healthcheck"])
+        for path in (args.status, args.ran, args.webhook, args.netcheck_log, args.job_plist, args.log):
+            self.assertTrue(str(path).startswith(str(kt.HOME)), path)
+
+    def test_due_slots_follow_schedule_json_not_a_fixed_clock(self):
+        sched = kt.load_schedule(ROOT / "schedule.json")
+        os.environ["KIDS_TV_TIMES"] = str(self.dir / "no-times.json")
+        os.environ["KIDS_TV_RUN_DAYS"] = str(self.dir / "run-days.json")
+        friday_730 = dt.datetime(2026, 10, 30, 7, 30, tzinfo=LA)
+        monday_730 = dt.datetime(2026, 10, 26, 7, 30, tzinfo=LA)
+        self.write_run_days(friday_730)
+        self.assertNotIn("morning-off", kt.morning_slots_due(friday_730, sched, []))
+        self.assertIn("morning-on", kt.morning_slots_due(friday_730, sched, []))
+        self.write_run_days(monday_730)
+        self.assertEqual(kt.morning_slots_due(monday_730, sched, ["morning-on"]), ["morning-off"])
+        self.assertNotIn("morning-off", kt.morning_slots_due(
+            dt.datetime(2026, 10, 26, 7, 29, tzinfo=LA), sched, []))
+        self.assertEqual(kt.morning_slots_due(dt.datetime(2026, 10, 26, 6, 4, tzinfo=LA), sched, []), [])
+        self.assertEqual(kt.morning_slots_due(dt.datetime(2026, 10, 26, 6, 5, tzinfo=LA), sched, []), ["morning-on"])
+        self.write_run_days(monday_730, run=False)
+        self.assertEqual(kt.morning_slots_due(monday_730, sched, []), [])
+
+    def test_friday_0730_does_not_run_the_off_check(self):
+        self.write_run_days(dt.datetime(2026, 10, 30, 7, 30, tzinfo=LA))
+        self.ran.write_text(json.dumps({"date": "2026-10-30", "slots": ["morning-on"]}))
+        rc, out, status = self.invoke(None, "2026-10-30T07:30:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("nothing due", out)
+        self.assertIsNone(status)
+        self.assertEqual(json.loads(self.ran.read_text(encoding="utf-8"))["slots"], ["morning-on"])
+
+    def test_monday_0730_off_check_fails_when_the_tvs_are_still_on(self):
+        self.write_run_days(dt.datetime(2026, 10, 26, 7, 30, tzinfo=LA))
+        self.ran.write_text(json.dumps({"date": "2026-10-26", "slots": ["morning-on"]}))
+        self.write_log("2026-10-26 07:29:00 boys-room: cast sent")
+        self.write_net("2026-10-26 07:00:00 8 targets ok")
+        rc, _out, status = self.invoke(None, "2026-10-26T07:30:00")
+        self.assertEqual(rc, 1)
+        self.assertEqual(status["result"], "fail")
+        self.assertEqual(status["slot"], "morning-off")
+        self.assertIn("did not go off", status["reason"])
+        self.assertEqual(json.loads(self.ran.read_text(encoding="utf-8"))["slots"],
+                         ["morning-on", "morning-off"])
+
+    def test_monday_off_check_passes_and_runs_once(self):
+        self.write_run_days(dt.datetime(2026, 10, 26, 7, 30, tzinfo=LA))
+        self.ran.write_text(json.dumps({"date": "2026-10-26", "slots": ["morning-on"]}))
+        self.write_log("2026-10-26 07:25:00 boys-room: power off sent",
+                       "2026-10-26 07:25:01 girls-room: power off sent")
+        self.write_net("2026-10-26 07:00:00 8 targets ok")
+        rc, _out, status = self.invoke(None, "2026-10-26T07:30:00")
+        self.assertEqual(rc, 0)
+        self.assertEqual(status["result"], "pass")
+        self.assertIn("Both TVs went off", status["reason"])
+        self.write_log("2026-10-26 07:29:00 boys-room: cast sent")
+        rc, out, status = self.invoke(None, "2026-10-26T07:35:00")
+        self.assertEqual(rc, 0)
+        self.assertIn("nothing due", out)
+        self.assertEqual(status["result"], "pass")
+
+    def test_times_override_moves_the_off_check_and_a_broken_file_is_not_a_failure(self):
+        when = dt.datetime(2026, 10, 30, 7, 30, tzinfo=LA)
+        self.write_run_days(when)
+        self.ran.write_text(json.dumps({"date": "2026-10-30", "slots": ["morning-on"]}))
+        times = self.dir / "times.json"
+        times.write_text(json.dumps({"weekdays": {"friday": {"alarm": "06:30", "leaveBy": "07:00"}}}))
+        self.write_log("2026-10-30 07:29:00 boys-room: cast sent")
+        self.write_net("2026-10-30 07:00:00 8 targets ok")
+        rc, _out, status = self.invoke(None, "2026-10-30T07:30:00", extra=("--times", str(times)))
+        self.assertEqual(rc, 1)
+        self.assertEqual(status["slot"], "morning-off")
+        self.assertIn("did not go off", status["reason"])
+        times.write_text("{")
+        self.webhook.write_text("WEBHOOK_URL=https://alerts.example.test/hook\n")
+        os.chmod(self.webhook, 0o600)
+        posted = []
+
+        class Resp:
+            def read(self):
+                return b""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+        def urlopen(request, timeout=10):
+            posted.append(request.full_url)
+            return Resp()
+
+        self.write_log("2026-10-30 07:55:00 ALERT: schedule: times override file is not valid JSON, so nothing runs")
+        rc, out, status = self.invoke(None, "2026-10-30T08:00:00", urlopen=urlopen, extra=("--times", str(times)))
+        self.assertEqual(rc, 0)
+        self.assertEqual(status["result"], "pass")
+        self.assertEqual(status["reason"], "not a run day, alert already sent")
+        self.assertIn("not a run day, alert already sent", out)
+        rc, out, status = self.invoke(None, "2026-10-30T08:05:00", urlopen=urlopen, extra=("--times", str(times)))
+        self.assertEqual(rc, 0)
+        self.assertEqual(status["reason"], "not a run day, alert already sent")
+        self.assertEqual(posted, [])
+        alerts = json.loads(self.alert.read_text(encoding="utf-8"))["alerts"]
+        self.assertEqual([(a["date"], a["tv"], a["step"]) for a in alerts], [("2026-10-30", "schedule", "times")])
+        self.write_run_days(dt.datetime(2026, 10, 29, 20, 45, tzinfo=LA))
+        self.write_log("2026-10-29 20:44:00 ALERT: schedule: times override file is not valid JSON, so nothing runs")
+        self.write_net("2026-10-29 20:00:00 8 targets ok")
+        rc, _out, status = self.invoke("evening", "2026-10-29T20:45:00", urlopen=urlopen, extra=("--times", str(times)))
+        self.assertEqual(rc, 0)
+        self.assertEqual(status["result"], "pass")
+        self.assertEqual(status["reason"], "not a run day, alert already sent")
+        self.assertEqual(posted, [])
+        alerts = json.loads(self.alert.read_text(encoding="utf-8"))["alerts"]
+        self.assertEqual([(a["date"], a["tv"], a["step"]) for a in alerts],
+                         [("2026-10-30", "schedule", "times")])
+
+    def test_morning_on_pass_fail_not_a_run_day_and_sonos(self):
+        self.write_run_days(dt.datetime(2026, 10, 29, 6, 20, tzinfo=LA))
+        self.write_net("2026-10-29 06:00:00 8 targets ok")
+        self.write_log("2026-10-29 06:18:00 boys-room: power on sent",
+                       "2026-10-29 06:18:01 girls-room: power on sent",
+                       "2026-10-29 06:19:00 boys-room: cast sent",
+                       "2026-10-29 06:19:01 girls-room: cast sent")
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00")
+        self.assertEqual((rc, status["result"]), (0, "pass"))
+        self.assertIn("Sonos is off", " ".join(status["evidence"]))
+        self.sonos()
+        self.write_log("2026-10-29 06:18:00 boys-room: power on sent",
+                       "2026-10-29 06:18:01 girls-room: power on sent",
+                       "2026-10-29 06:18:30 boys-room: sonos playing after alarm",
+                       "2026-10-29 06:18:31 girls-room: sonos playing after alarm",
+                       "2026-10-29 06:19:00 boys-room: cast sent",
+                       "2026-10-29 06:19:01 girls-room: cast sent")
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00")
+        self.assertEqual(status["result"], "pass")
+        self.assertIn("Daniel's Room", status["reason"])
+        self.assertIn("Girl's Room", status["reason"])
+        self.write_log("2026-10-29 06:18:00 boys-room: power on sent",
+                       "2026-10-29 06:19:00 boys-room: cast sent",
+                       "2026-10-29 06:19:01 girls-room: cast sent")
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00")
+        self.assertEqual(rc, 1)
+        self.assertIn("girls-room did not turn on", status["reason"])
+        self.write_run_days(dt.datetime(2026, 10, 29, 6, 20, tzinfo=LA), run=False)
+        self.config.write_text("{}\n")
+        self.write_log("2026-10-29 06:19:30 fixture line")
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00")
+        self.assertEqual((rc, status["result"]), (0, "pass"))
+        self.assertIn("not a run day", status["reason"])
+
+    def test_morning_off_can_pass_from_the_state_file(self):
+        self.write_run_days(dt.datetime(2026, 10, 29, 7, 30, tzinfo=LA))
+        self.write_net("2026-10-29 07:00:00 8 targets ok")
+        self.state.write_text(json.dumps({
+            "date": "2026-10-29",
+            "tvs": {"boys-room": {"off_done": "2026-10-29T07:20:00-07:00"},
+                    "girls-room": {"off_done": "2026-10-29T07:21:00-07:00"}}}))
+        self.write_log("2026-10-29 07:29:00 boys-room: cast uptime at off: 5 s")
+        rc, _out, status = self.invoke("morning-off", "2026-10-29T07:30:00")
+        self.assertEqual((rc, status["result"]), (0, "pass"))
+        self.assertIn("state: boys-room off_done", " ".join(status["evidence"]))
+
+    def test_stale_log_bad_netcheck_and_wrong_program_arguments(self):
+        self.write_run_days(dt.datetime(2026, 10, 29, 6, 20, tzinfo=LA))
+        self.write_log("2026-10-29 06:00:00 boys-room: power on sent",
+                       "2026-10-29 06:00:01 girls-room: power on sent",
+                       "2026-10-29 06:00:02 boys-room: cast sent",
+                       "2026-10-29 06:00:03 girls-room: cast sent")
+        self.write_net("2026-10-29 06:00:00 8 targets ok")
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00")
+        self.assertEqual(rc, 1)
+        self.assertIn("more than 10 minutes", status["reason"])
+        self.write_log("2026-10-29 06:19:00 boys-room: power on sent",
+                       "2026-10-29 06:19:01 girls-room: power on sent",
+                       "2026-10-29 06:19:02 boys-room: cast sent",
+                       "2026-10-29 06:19:03 girls-room: cast sent",
+                       "2026-10-29 06:19:04 ERROR: No route to host")
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00")
+        self.assertIn("No route to host", status["reason"])
+        self.write_log("2026-10-29 06:19:00 boys-room: power on sent",
+                       "2026-10-29 06:19:01 girls-room: power on sent",
+                       "2026-10-29 06:19:02 boys-room: cast sent",
+                       "2026-10-29 06:19:03 girls-room: cast sent")
+        self.write_net("2026-10-29 01:00:00 8 targets ok\n2026-10-29 06:00:00 1 targets ok\n")
+        self.boot = "2026-10-29T05:00:00"
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00")
+        self.assertIn("8 targets ok", status["reason"])
+        self.assertEqual(rc, 1)
+        self.write_net("2026-10-29 01:00:00 1 targets ok\n2026-10-29 06:00:00 8 targets ok\n")
+        self.write_plist("/usr/bin/python3")
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00")
+        self.assertIn("/usr/bin/python3", status["reason"])
+        self.assertIn("kids-tv-helper", status["reason"])
+
+    def test_evening_sonos_sync_pass_and_fail_and_sonos_off(self):
+        self.sonos()
+        self.write_run_days(dt.datetime(2026, 10, 29, 20, 45, tzinfo=LA))
+        self.write_net("2026-10-29 20:00:00 8 targets ok")
+        self.write_log(
+            "2026-10-29 20:40:00 boys-room: sonos alarm for 2026-10-30: already on 06:30 ON_5",
+            "2026-10-29 20:40:01 girls-room: sonos alarm for 2026-10-30: updated (ID 2), re-read: on 06:30 ON_5",
+            "2026-10-29 20:44:00 boys-room: cast sent")
+        rc, _out, status = self.invoke("evening", "2026-10-29T20:45:00")
+        self.assertEqual((rc, status["result"]), (0, "pass"))
+        self.assertIn("Daniel's Room", status["reason"])
+        self.assertIn("Girl's Room", status["reason"])
+        self.write_log(
+            "2026-10-29 20:40:00 boys-room: sonos alarm for 2026-10-30: already on 06:00 ON_5",
+            "2026-10-29 20:40:01 girls-room: sonos alarm for 2026-10-30: already off",
+            "2026-10-29 20:44:00 boys-room: cast sent")
+        rc, _out, status = self.invoke("evening", "2026-10-29T20:45:00")
+        self.assertEqual(rc, 1)
+        self.assertIn("wanted on 06:30 ON_5", status["reason"])
+        self.config.write_text("{}\n")
+        rc, _out, status = self.invoke("evening", "2026-10-29T20:45:00")
+        self.assertEqual(rc, 1)
+        self.assertIn("not automated", status["reason"])
+        self.write_run_days(dt.datetime(2026, 10, 31, 20, 45, tzinfo=LA))
+        self.write_log("2026-10-31 20:44:00 boys-room: cast sent")
+        self.write_net("2026-10-31 20:00:00 8 targets ok")
+        rc, _out, status = self.invoke("evening", "2026-10-31T20:45:00")
+        self.assertEqual((rc, status["result"]), (0, "pass"))
+        self.assertIn("not a run day", " ".join(status["evidence"]))
+
+    def test_webhook_posts_once_acks_delivered_ids_and_stays_quiet_without_one(self):
+        self.write_run_days(dt.datetime(2026, 10, 29, 6, 20, tzinfo=LA))
+        self.write_net("2026-10-29 06:00:00 8 targets ok")
+        self.write_log("2026-10-29 06:00:00 boys-room: power on sent")
+        self.webhook.write_text("WEBHOOK_URL=https://alerts.example.test/hook\n")
+        os.chmod(self.webhook, 0o600)
+        posted = []
+
+        class Resp:
+            def read(self):
+                return b""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+        def urlopen(request, timeout=10):
+            posted.append((request.full_url, json.loads(request.data.decode("utf-8"))))
+            return Resp()
+
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00", urlopen=urlopen)
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(posted), 1)
+        self.assertEqual(posted[0][0], "https://alerts.example.test/hook")
+        self.assertNotIn("SECRETTOKEN", json.dumps(posted[0][1]))
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00", urlopen=urlopen)
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(posted), 1)
+        self.write_log("2026-10-29 06:00:00 ERROR: Local Network permission blocked")
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00", urlopen=urlopen)
+        self.assertEqual(len(posted), 2)
+        self.assertIn("Local Network", status["reason"])
+
+        self.alert.write_text(json.dumps({"alerts": [
+            {"date": "2026-10-29", "tv": "boys-room", "step": "on", "error": "boom",
+             "at": "2026-10-29T06:00:00-07:00"}]}))
+        seen = []
+        original_ack = kt.alerts_command
+
+        def record_ack(path, ack, ack_all, show_all, as_json, now):
+            seen.append((list(ack), ack_all))
+            return original_ack(path, ack, ack_all, show_all, as_json, now)
+
+        with mock.patch.object(kt, "alerts_command", side_effect=record_ack):
+            rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00", urlopen=urlopen)
+        self.assertEqual(seen, [(["2026-10-29/boys-room/on"], False)])
+        acked = json.loads((self.dir / "kids-tv-alert-ack.json").read_text(encoding="utf-8"))
+        self.assertIn("2026-10-29/boys-room/on", acked["acked"])
+
+        def boom(request, timeout=10):
+            raise urllib.error.URLError("down")
+
+        self.alert.write_text(json.dumps({"alerts": [
+            {"date": "2026-10-29", "tv": "girls-room", "step": "cast", "error": "boom",
+             "at": "2026-10-29T06:05:00-07:00"}]}))
+        (self.dir / "kids-tv-alert-ack.json").unlink()
+        sent = self.status.parent / (self.status.stem + "-sent.json")
+        if sent.exists():
+            sent.unlink()
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00", urlopen=boom)
+        self.assertEqual(rc, 1)
+        self.assertIn("URLError", status["reason"])
+        self.assertNotIn("alerts.example.test", status["reason"] + " ".join(status["evidence"]))
+        self.assertFalse((self.dir / "kids-tv-alert-ack.json").exists())
+
+        self.webhook.unlink()
+        sent = self.status.parent / (self.status.stem + "-sent.json")
+        if sent.exists():
+            sent.unlink()
+        rc, _out, _status = self.invoke("morning-on", "2026-10-29T06:20:00")
+        self.assertEqual(rc, 1)
+        self.assertFalse((self.dir / "kids-tv-alert-ack.json").exists())
+
+        self.webhook.write_text("WEBHOOK_URL=https://user:SECRETTOKEN@alerts.example.test/hook\n")
+        os.chmod(self.webhook, 0o644)
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00")
+        self.assertEqual(rc, 1)
+        self.assertIn("chmod 600", status["reason"])
+
+    def test_healthcheck_plists_cover_the_interval_and_the_evening(self):
+        morning = plistlib.loads((ROOT / "launchd" / "com.davidcasas.morningboard.kids-tv-healthcheck.plist").read_bytes())
+        evening = plistlib.loads(
+            (ROOT / "launchd" / "com.davidcasas.morningboard.kids-tv-healthcheck-evening.plist").read_bytes())
+        self.assertEqual(morning["Label"], "com.davidcasas.morningboard.kids-tv-healthcheck")
+        self.assertEqual(morning["ProgramArguments"],
+                         ["/usr/bin/python3", "__REPO__/scripts/kids-tv.py", "healthcheck"])
+        self.assertEqual(morning["StartInterval"], 300)
+        self.assertNotIn("StartCalendarInterval", morning)
+        self.assertNotIn("RunAtLoad", morning)
+        self.assertEqual(evening["ProgramArguments"],
+                         ["/usr/bin/python3", "__REPO__/scripts/kids-tv.py", "healthcheck", "--slot", "evening"])
+        self.assertEqual(evening["StartCalendarInterval"], {"Hour": 20, "Minute": 45})
+        self.assertNotIn("Weekday", evening["StartCalendarInterval"])
+        self.assertNotIn("RunAtLoad", evening)
 
 
 if __name__ == "__main__":
