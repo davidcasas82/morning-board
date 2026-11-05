@@ -73,6 +73,7 @@ def setUpModule():
     fixture = Path(_NO_SKIP_DIR.name, "run-days.json")
     fixture.write_text(json.dumps(run_days_doc(CLOCK.isoformat(), every_day_runs())))
     os.environ["KIDS_TV_RUN_DAYS"] = str(fixture)
+    os.environ["KIDS_TV_TIMES"] = str(Path(_NO_SKIP_DIR.name, "no-times.json"))  # never the mini's real times file
     os.environ["KIDS_TV_ALERT"] = str(Path(_NO_SKIP_DIR.name, "alert.json"))  # never the mini's real alert file
     _clock_patch.start()
     _home_patch.start()
@@ -84,6 +85,7 @@ def tearDownModule():
     os.environ.pop("KIDS_TV_SKIP", None)
     os.environ.pop("KIDS_TV_CONFIG", None)
     os.environ.pop("KIDS_TV_RUN_DAYS", None)
+    os.environ.pop("KIDS_TV_TIMES", None)
     os.environ.pop("KIDS_TV_ALERT", None)
     _NO_SKIP_DIR.cleanup()
 
@@ -477,6 +479,229 @@ class RunDaysTests(unittest.TestCase):
         bad = re.compile("|".join(["group" + r"\.calendar", "dad'?s" + " house", "mom'?s" + " house", "kid" + " rotation"]), re.I)
         for path in (Path(kt.__file__), Path(__file__), ROOT / "README.md", ROOT / "kids-tv-skip.json"):
             self.assertIsNone(bad.search(path.read_text()), path.name)
+
+
+def weekday_schedule():
+    """Mon-Fri on, weekends off. Tuesday and Wednesday use the Monday times."""
+    sched = json.loads(json.dumps(SCHEDULE))
+    for key in ("tuesday", "wednesday"):
+        sched["days"][key] = {"enabled": True, "label": "School day", "alarm": "06:00", "leaveBy": "07:10"}
+    return sched
+
+
+class TimesOverrideTests(unittest.TestCase):
+    """Calendar wake-days and the local times file. Fixtures only: never ~/.config or ~/Library/Logs."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.times = self.dir / "times.json"
+        self.alert = self.dir / "alert.json"
+        self.sched = weekday_schedule()
+
+    def use_times(self, doc):
+        self.times.write_text(doc if isinstance(doc, str) else json.dumps(doc))
+        return mock.patch.dict(os.environ, {"KIDS_TV_TIMES": str(self.times)})
+
+    def use_run_days(self, days, generated_at=None):
+        path = self.dir / "run-days.json"
+        path.write_text(json.dumps(run_days_doc(generated_at or CLOCK.isoformat(), days)))
+        return mock.patch.dict(os.environ, {"KIDS_TV_RUN_DAYS": str(path)})
+
+    def test_times_path_is_the_fixture_not_the_real_home(self):
+        self.assertEqual(kt.default_times_path(), Path(_NO_SKIP_DIR.name, "no-times.json"))
+        self.assertNotEqual(kt.default_times_path(), Path.home() / ".config" / "kids-tv" / "times.json")
+
+    def test_tuesday_runs_when_the_calendar_says_run(self):
+        with self.use_run_days({TUE.isoformat(): True}):
+            plan = kt.plan_for(self.sched, TUE, CLOCK)
+        self.assertEqual((plan["on"], plan["off"]), (dt.time(6, 0), dt.time(7, 10)))
+        self.assertEqual((kt.resolved_day_times(self.sched, TUE, now=CLOCK)["alarm"],
+                          kt.resolved_day_times(self.sched, TUE, now=CLOCK)["leaveBy"]),
+                         (plan["on"], plan["off"]))
+        repo = kt.load_schedule(ROOT / "schedule.json")
+        self.assertTrue(repo["days"]["tuesday"]["enabled"])
+        self.assertEqual((repo["days"]["tuesday"]["alarm"], repo["days"]["wednesday"]["leaveBy"]), ("06:00", "07:10"))
+        with self.use_run_days({TUE.isoformat(): True}):
+            self.assertEqual(kt.hm(kt.plan_for(repo, TUE, CLOCK)["on"]), "06:00")
+
+    def test_tuesday_stays_off_when_the_calendar_says_no(self):
+        # The file is from the evening before, so Tuesday morning can read it.
+        stamp = dt.datetime(2026, 10, 26, 20, 0, tzinfo=LA).isoformat()
+        with self.use_run_days({TUE.isoformat(): False}, stamp):
+            self.assertIsNone(kt.plan_for(self.sched, TUE, at(TUE, 6, 0)))
+            self.assertFalse(kt.is_run_day(self.sched, TUE, now=at(TUE, 6, 0)))
+            rec = Recorder()
+            kt.tick(self.sched, at(TUE, 6, 0), self.dir / "s.json", rec.actions(), kt.Log(self.dir / "l.log"))
+        self.assertEqual(rec.calls, [])
+
+    def test_saturday_stays_off_even_when_the_calendar_says_run(self):
+        sat = dt.date(2026, 10, 31)
+        with self.use_run_days({sat.isoformat(): True}), self.use_times(
+                {"dates": {sat.isoformat(): {"alarm": "08:00", "leaveBy": "09:00"}}}):
+            self.assertIsNone(kt.plan_for(self.sched, sat, CLOCK))
+            self.assertFalse(kt.is_run_day(self.sched, sat, now=CLOCK))
+            # a date override can name a time, and the day still does not run
+            self.assertEqual(kt.hm(kt.resolved_day_times(self.sched, sat, now=CLOCK)["alarm"]), "08:00")
+            rec = Recorder()
+            kt.tick(self.sched, at(sat, 8, 0), self.dir / "s.json", rec.actions(), kt.Log(self.dir / "l.log"))
+        self.assertEqual(rec.calls, [])
+        repo = kt.load_schedule(ROOT / "schedule.json")
+        self.assertFalse(repo["days"]["saturday"]["enabled"])
+        self.assertFalse(repo["days"]["sunday"]["enabled"])
+
+    def test_weekday_override_changes_plan_and_the_tv_tick(self):
+        with self.use_times({"weekdays": {"thursday": {"alarm": "06:20", "leaveBy": "07:25"}}}):
+            plan = kt.plan_for(SCHEDULE, THU, CLOCK)
+            self.assertEqual((plan["on"], plan["off"]), (dt.time(6, 20), dt.time(7, 25)))
+            self.assertEqual((kt.resolved_day_times(SCHEDULE, THU, now=CLOCK)["alarm"],
+                              kt.resolved_day_times(SCHEDULE, THU, now=CLOCK)["leaveBy"]),
+                             (plan["on"], plan["off"]))
+            self.assertEqual(kt.plan_for(SCHEDULE, FRI, CLOCK)["on"], dt.time(6, 30))
+            rec = Recorder()
+            log = kt.Log(self.dir / "l.log")
+            kt.tick(SCHEDULE, at(THU, 6, 0), self.dir / "early.json", rec.actions(), log)
+            self.assertEqual(rec.calls, [])
+            kt.tick(SCHEDULE, at(THU, 6, 20), self.dir / "s.json", rec.actions(), log)
+        self.assertIn(("on", "boys-room"), rec.calls)
+        self.assertIn(("on", "girls-room"), rec.calls)
+
+    def test_date_override_beats_the_weekday(self):
+        with self.use_times({"weekdays": {"friday": {"alarm": "06:15", "leaveBy": "07:25"}},
+                             "dates": {"2026-10-30": {"alarm": "07:00", "leaveBy": "08:10"}}}):
+            self.assertEqual((kt.plan_for(SCHEDULE, FRI, CLOCK)["on"], kt.plan_for(SCHEDULE, FRI, CLOCK)["off"]),
+                             (dt.time(7, 0), dt.time(8, 10)))
+            later = dt.date(2026, 11, 6)  # the next Friday keeps the weekday override
+            self.assertEqual((kt.plan_for(SCHEDULE, later, CLOCK)["on"], kt.plan_for(SCHEDULE, later, CLOCK)["off"]),
+                             (dt.time(6, 15), dt.time(7, 25)))
+
+    def test_bad_override_fails_closed_alerts_once_and_does_not_run(self):
+        when = at(THU, 6, 0)
+        logs = []
+        rec = Recorder()
+        with self.use_times("{not json"):
+            with self.assertRaises(kt.TimesError) as raised:
+                kt.plan_for(SCHEDULE, THU, when, log=logs.append, alert_path=self.alert)
+            self.assertIn("nothing runs", str(raised.exception))
+            self.assertEqual(kt.tick(SCHEDULE, at(THU, 6, 0), self.dir / "s.json", rec.actions(),
+                                     logs.append, alert_path=self.alert), 1)
+            self.assertEqual(kt.tick(SCHEDULE, at(THU, 6, 1), self.dir / "s.json", rec.actions(),
+                                     logs.append, alert_path=self.alert), 1)
+        self.assertEqual(rec.calls, [])
+        alerts = json.loads(self.alert.read_text())["alerts"]
+        self.assertEqual([(a["date"], a["tv"], a["step"]) for a in alerts], [("2026-10-29", "schedule", "times")])
+        self.assertIn("nothing runs", alerts[0]["error"])
+        self.assertEqual(len([m for m in logs if str(m).startswith("ALERT:")]), 1)
+
+    def test_a_tv_that_came_on_still_powers_off_when_times_breaks(self):
+        rec = Recorder()
+        state = self.dir / "s.json"
+        log = kt.Log(self.dir / "l.log")
+        with self.use_times({"weekdays": {"thursday": {"alarm": "06:00", "leaveBy": "06:30"}}}):
+            self.assertEqual(kt.tick(SCHEDULE, at(THU, 6, 0), state, rec.actions(), log, alert_path=self.alert), 0)
+            self.assertIn(("on", "boys-room"), rec.calls)
+            self.assertIn(("on", "girls-room"), rec.calls)
+            self.times.write_text("{not json")
+            rec.calls.clear()
+            kt.tick(SCHEDULE, at(THU, 6, 30), state, rec.actions(), log, alert_path=self.alert)
+        self.assertEqual([c for c in rec.calls if c[0] == "off"],
+                         [("off", "boys-room"), ("off", "girls-room")])
+        self.assertFalse(any(c[0] == "on" for c in rec.calls))
+
+    def test_a_bad_entry_is_also_a_bad_file(self):
+        logs = []
+        with self.use_times({"weekdays": {"friday": {"alarm": "08:00", "leaveBy": "07:40"}}}):
+            with self.assertRaises(kt.TimesError):
+                kt.plan_for(SCHEDULE, FRI, CLOCK, log=logs.append, alert_path=self.alert)
+        self.assertIn("leaveBy is not after alarm", self.alert.read_text())
+        self.assertIn("nothing runs", self.alert.read_text())
+        self.assertEqual(len([m for m in logs if m.startswith("ALERT:")]), 1)
+
+    def test_times_override_reaches_the_cast_url(self):
+        seen = []
+        rec = Recorder()
+        actions = rec.actions()
+        real_cast = actions["cast"]
+
+        def spy(name):
+            seen.append(kt.cast_board_url)
+            return real_cast(name)
+
+        actions["cast"] = spy
+        previous = kt.cast_board_url
+        self.addCleanup(setattr, kt, "cast_board_url", previous)
+        with self.use_times({"weekdays": {"thursday": {"alarm": "06:20", "leaveBy": "07:25"}}}):
+            self.assertEqual(kt.tick(SCHEDULE, at(THU, 6, 20), self.dir / "s.json", actions, kt.Log(self.dir / "l.log")), 0)
+        self.assertIn(("cast", "boys-room"), rec.calls)
+        self.assertTrue(seen)
+        self.assertEqual(seen[0], kt.BOARD_URL + "?alarm=06:20&leaveBy=07:25")
+        self.assertEqual(kt.cast_board_url, kt.BOARD_URL)
+
+    def test_times_set_writes_atomically_and_show_prints_the_winner(self):
+        sched = self.dir / "schedule.json"
+        sched.write_text(json.dumps(SCHEDULE))
+        log = self.dir / "l.log"
+        base = ["--schedule", str(sched), "--times", str(self.times), "--log", str(log),
+                "--alert", str(self.alert), "--config", str(self.dir / "no-config.json")]
+        self.assertFalse(self.times.parent.joinpath("cfg").exists())
+        nested = self.dir / "cfg" / "times.json"
+        nested_cmd = ["--schedule", str(sched), "--times", str(nested), "--log", str(log),
+                      "--config", str(self.dir / "no-config.json"),
+                      "times", "set", "friday", "--alarm", "06:30", "--leave", "07:40"]
+        self.assertEqual(kt.main(nested_cmd), 0)
+        self.assertFalse(nested.with_suffix(".tmp").exists())
+        self.assertEqual(json.loads(nested.read_text())["weekdays"]["friday"],
+                         {"alarm": "06:30", "leaveBy": "07:40"})
+        self.assertEqual(kt.main(base + ["times", "set", "monday", "--alarm", "06:05", "--leave", "07:15"]), 0)
+        self.assertEqual(kt.main(base + ["times", "set", "2026-11-13", "--alarm", "07:05", "--leave", "08:15"]), 0)
+        data = json.loads(self.times.read_text())
+        self.assertEqual(data["weekdays"]["monday"]["alarm"], "06:05")
+        self.assertEqual(data["dates"]["2026-11-13"], {"alarm": "07:05", "leaveBy": "08:15"})
+        self.assertFalse(self.times.with_suffix(".tmp").exists())
+        shown = []
+        with mock.patch("builtins.print", lambda *a, **k: shown.append(" ".join(str(x) for x in a))):
+            self.assertEqual(kt.main(base + ["times", "show"]), 0)
+        text = "\n".join(shown)
+        self.assertIn("2026-11-13: alarm 07:05, leaveBy 08:15 (date)", text)
+        self.assertIn("monday", text)
+        self.assertIn("06:05", text)
+
+    def test_times_set_rejects_a_bad_clock_and_does_not_write(self):
+        sched = self.dir / "schedule.json"
+        sched.write_text(json.dumps(SCHEDULE))
+        log = self.dir / "l.log"
+        base = ["--schedule", str(sched), "--times", str(self.times), "--log", str(log),
+                "--config", str(self.dir / "no-config.json")]
+        for which, alarm, leave in (("friday", "6am", "07:40"), ("friday", "08:00", "07:40"),
+                                    ("funday", "06:00", "07:00"), ("2026-13-40", "06:00", "07:00"),
+                                    ("friday", "06:30", "06:30")):
+            self.assertEqual(kt.main(base + ["times", "set", which, "--alarm", alarm, "--leave", leave]), 1, which)
+            self.assertFalse(self.times.exists(), which)
+        self.assertIn("not HH:MM", log.read_text())
+
+    def test_times_set_refuses_weekends_and_times_outside_the_window(self):
+        sched = self.dir / "schedule.json"
+        sched.write_text(json.dumps(SCHEDULE))
+        log = self.dir / "l.log"
+        base = ["--schedule", str(sched), "--times", str(self.times), "--log", str(log),
+                "--config", str(self.dir / "no-config.json")]
+        refused = (("saturday", "06:00", "07:10", "weekend"),
+                   ("sunday", "06:00", "07:10", "weekend"),
+                   ("2026-11-07", "06:00", "07:10", "weekend"),  # Saturday
+                   ("2026-11-08", "06:00", "07:10", "weekend"),  # Sunday
+                   ("friday", "04:59", "07:10", "05:00 to 09:00"),
+                   ("friday", "09:01", "10:00", "05:00 to 09:00"),
+                   ("friday", "05:00", "05:59", "06:00 to 10:00"),
+                   ("friday", "06:00", "10:01", "06:00 to 10:00"))
+        for which, alarm, leave, message in refused:
+            self.assertEqual(kt.main(base + ["times", "set", which, "--alarm", alarm, "--leave", leave]), 1, which)
+            self.assertFalse(self.times.exists(), which)
+            self.assertIn(message, log.read_text(), which)
+        self.assertEqual(kt.main(base + ["times", "set", "friday", "--alarm", "05:00", "--leave", "06:00"]), 0)
+        self.assertEqual(kt.main(base + ["times", "set", "friday", "--alarm", "09:00", "--leave", "10:00"]), 0)
+        saved = json.loads(self.times.read_text())["weekdays"]["friday"]
+        self.assertEqual(saved, {"alarm": "09:00", "leaveBy": "10:00"})
 
 
 class GraceAndStateErrorTests(unittest.TestCase):
@@ -1487,7 +1712,7 @@ class PlanZoneNitTests(unittest.TestCase):
         seen = []
         real = kt.plan_for
 
-        def spy(schedule, day, now=None):
+        def spy(schedule, day, now=None, **_extra):
             seen.append(now)
             return real(schedule, day, now)
 
@@ -1648,6 +1873,40 @@ class SonosTests(unittest.TestCase):
         owned = self.owned()
         self.assertEqual((owned["boys-room"]["id"], owned["boys-room"]["from"]), ("40", "created"))
         self.assertEqual((owned["girls-room"]["id"], owned["girls-room"]["from"]), ("5", "backup"))
+
+    def test_evening_sync_uses_the_resolved_override_time(self):
+        # Monday's weekday override loses to the one date. Both rooms get 06:22, not the schedule's 06:00.
+        times = Path(self.tmp.name, "times.json")
+        times.write_text(json.dumps({
+            "weekdays": {"monday": {"alarm": "06:15", "leaveBy": "07:20"}},
+            "dates": {"2026-11-02": {"alarm": "06:22", "leaveBy": "07:33"}}}))
+        with mock.patch.dict(os.environ, {"KIDS_TV_TIMES": str(times)}):
+            self.tick(dt.datetime(2026, 11, 1, 20, 30, tzinfo=LA))
+        self.assertEqual(self.alarm(GIRLS_UID)[0]["StartTime"], "06:22:00")
+        self.assertEqual(self.alarm(BOYS_UID)[0]["StartTime"], "06:22:00")
+        self.assertEqual(self.alarm(GIRLS_UID)[0]["Recurrence"], "ON_1")
+        self.assertEqual(self.alarm(GIRLS_UID)[0]["Enabled"], "1")
+
+    def test_evening_sync_turns_tomorrows_alarm_off_when_times_is_broken(self):
+        # Last week's repeating alarm is armed. A bad times file must turn it off.
+        self.fake.alarms[0].update(Enabled="1", Recurrence="ON_145", StartTime="06:00:00")
+        self.fake.alarms.append(listed("18", BOYS_UID, QUEUE, enabled="1", start="06:00:00", rec="ON_145"))
+        times = Path(self.tmp.name, "times.json")
+        times.write_text("{not json")
+        when = dt.datetime(2026, 11, 1, 20, 30, tzinfo=LA)
+        with mock.patch.dict(os.environ, {"KIDS_TV_TIMES": str(times)}):
+            self.assertEqual(self.tick(when), 0)
+            self.assertEqual(self.tick(when.replace(minute=31)), 0)
+        self.assertEqual(self.alarm(GIRLS_UID)[0]["Enabled"], "0")
+        self.assertEqual(self.alarm(BOYS_UID)[0]["Enabled"], "0")
+        self.assertEqual(self.alarm(OTHER_UID)[0]["Enabled"], "1")
+        updates = [args for action, args in self.fake.writes() if action == "UpdateAlarm"]
+        self.assertEqual(sorted(u["ID"] for u in updates), ["18", "5"])
+        self.assertTrue(all(u["Enabled"] == "0" for u in updates))
+        alerts = self.alerts()
+        self.assertEqual([(a["date"], a["tv"], a["step"]) for a in alerts], [("2026-11-02", "schedule", "times")])
+        self.assertIn("nothing runs", alerts[0]["error"])
+        self.assertEqual(len([m for m in self.logs if str(m).startswith("ALERT:")]), 1)
 
     def fresh_evening(self, when=dt.datetime(2026, 11, 1, 20, 30, tzinfo=LA)):
         if self.state.exists():

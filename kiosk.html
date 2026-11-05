@@ -1646,8 +1646,8 @@ let lastCalendarStamp = '';
 const DEFAULT_SCHEDULE = {
   days: {
         monday:    { enabled: true,  label: 'School day',        alarm: '06:00', leaveBy: '07:10' },
-        tuesday:   { enabled: false, label: 'Not here',          alarm: null,    leaveBy: null },
-        wednesday: { enabled: false, label: 'Not here',          alarm: null,    leaveBy: null },
+        tuesday:   { enabled: true,  label: 'School day',        alarm: '06:00', leaveBy: '07:10' },
+        wednesday: { enabled: true,  label: 'School day',        alarm: '06:00', leaveBy: '07:10' },
         thursday:  { enabled: true,  label: 'School day',        alarm: '06:00', leaveBy: '07:10' },
         friday:    { enabled: true,  label: 'Late start Friday', alarm: '06:30', leaveBy: '07:40' },
     saturday:  { enabled: false, label: 'No school',         alarm: null,    leaveBy: null },
@@ -1765,24 +1765,45 @@ function setScheduleStatus(text) {
   if (el) el.textContent = text;
 }
 
+// The TV job puts today's resolved alarm and leaveBy on the page address.
+// Both have to be present. A weekend stays off. Otherwise schedule.json stands.
+function applyCastTimes() {
+  const params = new URLSearchParams(window.location.search);
+  const alarm = normalizeHm(params.get('alarm'));
+  const leaveBy = normalizeHm(params.get('leaveBy'));
+  if (!alarm || !leaveBy) return false;
+  const key = JS_TO_KEY[new Date().getDay()];
+  const day = schedule.days[key];
+  if (!day || !day.enabled) return false;
+  day.alarm = alarm;
+  day.leaveBy = leaveBy;
+  return true;
+}
+
 function fetchSchedule() {
+  applyCastTimes();
   const url = new URL('schedule.json', window.location.href);
   url.searchParams.set('t', String(Date.now()));
   return fetch(url.toString(), { cache: 'no-store' }).then(function (res) {
     if (!res.ok) {
+      applyCastTimes();
       setScheduleStatus('Could not load schedule.json (' + res.status + '). Using built-in times.');
+      tickClock();
       return;
     }
     return res.json().then(function (data) {
       applyScheduleData(data);
-      setScheduleStatus('Loaded from GitHub. School mornings here: Mon, Thu, Fri.');
+      applyCastTimes();
+      setScheduleStatus('Loaded from GitHub. School mornings here: Mon-Fri. Sat and Sun stay off.');
       if (document.getElementById('sheetBg').classList.contains('open')) {
         buildWeekRows();
       }
       tickClock();
     });
   }).catch(function () {
+    applyCastTimes();
     setScheduleStatus('Could not load schedule.json. If this is a local file, open the GitHub URL instead.');
+    tickClock();
   });
 }
 
@@ -2016,6 +2037,7 @@ function startPreview(msLeft) {
 }
 
 try { localStorage.removeItem('morning-board-schedule'); } catch (e) {}
+applyCastTimes();
 tickClock();
 fetchSchedule();
 setInterval(fetchSchedule, 60 * 1000);

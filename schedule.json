@@ -4,11 +4,10 @@
   "notes": [
     "ONE shared household clock. Not a clock per kid. One alarm and one leaveBy per weekday.",
     "leaveBy is on-the-road time. Downstairs is 15 minutes before that.",
-    "School mornings at this house: Monday, Thursday, Friday only.",
-    "Tuesday and Wednesday are off. Kids do not wake up here those days.",
-    "Monday and Thursday: alarm 06:00 / on the road 07:10.",
+    "Any weekday can be a wake-up morning. The calendar run-days file decides which dates run.",
+    "Monday through Thursday: alarm 06:00 / on the road 07:10. Tuesday and Wednesday use those times.",
     "Friday: alarm 06:30 / on the road 07:40 (late start).",
-    "Saturday and Sunday are off."
+    "Saturday and Sunday stay off. The run-days file sets run = kids_home AND not no_school, from the private calendar (see the run-days routine), so a weekend must not wake the kids."
   ],
   "days": {
     "monday": {
@@ -20,20 +19,20 @@
       "comment": "Wake here. Alarm 6:00 AM. On the road 7:10 AM. Downstairs 6:55 AM."
     },
     "tuesday": {
-      "enabled": false,
-      "label": "Not here",
-      "alarm": null,
-      "leaveBy": null,
-      "status": "off",
-      "comment": "Kids do not wake up at this house on Tuesday."
+      "enabled": true,
+      "label": "School day",
+      "alarm": "06:00",
+      "leaveBy": "07:10",
+      "status": "confirmed",
+      "comment": "Wake here when the calendar says run. Alarm 6:00 AM. On the road 7:10 AM. Downstairs 6:55 AM."
     },
     "wednesday": {
-      "enabled": false,
-      "label": "Not here",
-      "alarm": null,
-      "leaveBy": null,
-      "status": "off",
-      "comment": "Kids do not wake up at this house on Wednesday."
+      "enabled": true,
+      "label": "School day",
+      "alarm": "06:00",
+      "leaveBy": "07:10",
+      "status": "confirmed",
+      "comment": "Wake here when the calendar says run. Alarm 6:00 AM. On the road 7:10 AM. Downstairs 6:55 AM."
     },
     "thursday": {
       "enabled": true,
