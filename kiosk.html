@@ -7,6 +7,7 @@
 <title>Morning board</title>
 <script src="daily.js?v=19"></script>
 <script src="quotes.js?v=20"></script>
+<script src="weather.js?v=2"></script>
 <script>
 /* Style, day/night, and color before first paint.
    Each Pacific board day (local Pacific time minus 3 hours, from 3:00 AM)
@@ -2634,7 +2635,31 @@ function wmoInfo(code, isDay = true, when = new Date()) {
   return info;
 }
 
-async function fetchWeather(lat, lon) {
+let weatherTimer = null;
+let weatherState = { fetchedAt: 0, fromBoard: false };
+
+function scheduleWeather(delay) {
+  if (weatherTimer) clearTimeout(weatherTimer);
+  weatherTimer = setTimeout(fetchWeather, delay);
+}
+
+function showWeatherError() {
+  const iconEl = document.getElementById('weather-icon');
+  const tempEl = document.getElementById('weather-temp');
+  const descEl = document.getElementById('weather-desc');
+  iconEl.className = '';
+  iconEl.innerHTML = ICONS.unknown;
+  tempEl.textContent = '';
+  descEl.textContent = 'FETCH ERROR';
+  document.getElementById('feels').textContent = '—';
+  document.getElementById('wind').textContent = '—';
+  document.getElementById('humid').textContent = '—';
+  document.getElementById('high').textContent = '—';
+  document.getElementById('weather-city').textContent = '';
+  document.getElementById('forecast-row').innerHTML = '';
+}
+
+function paintWeather(data) {
   const iconEl     = document.getElementById('weather-icon');
   const tempEl     = document.getElementById('weather-temp');
   const descEl     = document.getElementById('weather-desc');
@@ -2644,112 +2669,84 @@ async function fetchWeather(lat, lon) {
   const highEl     = document.getElementById('high');
   const forecastEl = document.getElementById('forecast-row');
   const cityEl     = document.getElementById('weather-city');
-  cityEl.textContent = '';
-
-  iconEl.className = 'w-loading';
-  iconEl.innerHTML = '';
-  iconEl.textContent = '···';
-  tempEl.textContent = '';
-  descEl.textContent = '';
-  feelsEl.textContent = '—';
-  windEl.textContent  = '—';
-  humidEl.textContent = '—';
-  highEl.textContent  = '—';
-
-  const useLat = lat ?? 33.6695;
-  const useLon = lon ?? -117.8231;
-
+  const cur   = data.current;
+  const daily  = data.daily;
+  const hourly = data.hourly;
   const DAYNAMES = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
 
-  try {
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${useLat}&longitude=${useLon}`
-      + `&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day`
-      + `&hourly=temperature_2m`
-      + `&daily=temperature_2m_max,weather_code,sunrise,sunset`
-      + `&temperature_unit=fahrenheit&wind_speed_unit=mph`
-      + `&timezone=auto&forecast_days=7&models=gfs_seamless`;
+  // Find current hour index in hourly array and compare next hour
+  const nowIso    = cur.time; // e.g. "2026-05-02T14:00"
+  const curIdx    = hourly.time.findIndex(t => t === nowIso);
+  const nextTemp  = curIdx >= 0 && curIdx + 1 < hourly.temperature_2m.length
+                    ? hourly.temperature_2m[curIdx + 1]
+                    : null;
+  const trendArrow = nextTemp === null ? ''
+                   : nextTemp > cur.temperature_2m + 0.3 ? ' ↑'
+                   : nextTemp < cur.temperature_2m - 0.3 ? ' ↓'
+                   : ' →';
 
-    const res  = await fetch(url);
-    const data = await res.json();
-    const cur   = data.current;
-    const daily  = data.daily;
-    const hourly = data.hourly;
+  const isDay = cur.is_day === 1;
+  const observedAt = cur.time ? new Date(cur.time) : new Date();
+  const info = wmoInfo(cur.weather_code, isDay, observedAt);
+  const temp = Math.round(cur.temperature_2m);
+  const feel = Math.round(cur.apparent_temperature);
+  const wind = Math.round(cur.wind_speed_10m);
+  const hum  = Math.round(cur.relative_humidity_2m);
+  const todayHigh = Math.round(daily.temperature_2m_max[0]);
 
-    // Find current hour index in hourly array and compare next hour
-    const nowIso    = cur.time; // e.g. "2026-05-02T14:00"
-    const curIdx    = hourly.time.findIndex(t => t === nowIso);
-    const nextTemp  = curIdx >= 0 && curIdx + 1 < hourly.temperature_2m.length
-                      ? hourly.temperature_2m[curIdx + 1]
-                      : null;
-    const trendArrow = nextTemp === null ? ''
-                     : nextTemp > cur.temperature_2m + 0.3 ? ' ↑'
-                     : nextTemp < cur.temperature_2m - 0.3 ? ' ↓'
-                     : ' →';
+  iconEl.className = '';
+  iconEl.innerHTML = info.icon;
+  tempEl.innerHTML = `${temp}°<span id="temp-arrow">${trendArrow}</span>`;
+  descEl.textContent = info.desc;
+  feelsEl.textContent = `${feel}°`;
+  windEl.textContent  = `${wind}MPH`;
+  humidEl.textContent = `${hum}%`;
+  highEl.textContent  = `${todayHigh}°`;
+  cityEl.textContent = typeof data.city === 'string' ? data.city : '';
 
-    const isDay = cur.is_day === 1;
-    const observedAt = cur.time ? new Date(cur.time) : new Date();
-    const info = wmoInfo(cur.weather_code, isDay, observedAt);
-    const temp = Math.round(cur.temperature_2m);
-    const feel = Math.round(cur.apparent_temperature);
-    const wind = Math.round(cur.wind_speed_10m);
-    const hum  = Math.round(cur.relative_humidity_2m);
-    const todayHigh = Math.round(daily.temperature_2m_max[0]);
-
-    iconEl.className = '';
-    iconEl.innerHTML = info.icon;
-    tempEl.innerHTML = `${temp}°<span id="temp-arrow">${trendArrow}</span>`;
-    descEl.textContent = info.desc;
-    feelsEl.textContent = `${feel}°`;
-    windEl.textContent  = `${wind}MPH`;
-    humidEl.textContent = `${hum}%`;
-    highEl.textContent  = `${todayHigh}°`;
-
-    if (daily.sunrise && daily.sunset && daily.sunrise[0] && daily.sunset[0]) {
-      try {
-        localStorage.setItem('morning-board-sun', JSON.stringify({
-          sunrise: daily.sunrise[0],
-          sunset: daily.sunset[0]
-        }));
-      } catch (e) {}
-      applyResolvedSky();
-    }
-
-    // 5-day forecast — skip today (index 0), show next 5
-    let fcHtml = '';
-    for (let i = 1; i <= 5; i++) {
-      const date    = new Date(daily.time[i] + 'T12:00:00');
-      const dayName = DAYNAMES[date.getDay()];
-      const high    = Math.round(daily.temperature_2m_max[i]);
-      const finfo   = wmoInfo(daily.weather_code[i]);
-      fcHtml += `
-        <div class="fc-day">
-          <span class="fc-name">${dayName}</span>
-          <div class="fc-icon">${finfo.icon}</div>
-          <span class="fc-high">${high}°</span>
-        </div>`;
-    }
-    forecastEl.innerHTML = fcHtml;
-
-    // Reverse geocode to get city name
+  if (daily.sunrise && daily.sunset && daily.sunrise[0] && daily.sunset[0]) {
     try {
-      const geoRes  = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${useLat}&lon=${useLon}&format=json`);
-      const geoData = await geoRes.json();
-      const city    = geoData.address.city
-                   || geoData.address.town
-                   || geoData.address.village
-                   || geoData.address.county
-                   || '';
-      const state   = geoData.address.state_code || geoData.address.state || '';
-      cityEl.textContent = city && state ? `${city}, ${state}` : city || state;
-    } catch {
-      cityEl.textContent = '';
-    }
-
-  } catch(e) {
-    iconEl.className = '';
-    iconEl.innerHTML = ICONS.unknown;
-    descEl.textContent = 'FETCH ERROR';
+      localStorage.setItem('morning-board-sun', JSON.stringify({
+        sunrise: daily.sunrise[0],
+        sunset: daily.sunset[0]
+      }));
+    } catch (e) {}
+    applyResolvedSky();
   }
+
+  // 5-day forecast — skip today (index 0), show next 5
+  let fcHtml = '';
+  for (let i = 1; i <= 5; i++) {
+    const date    = new Date(daily.time[i] + 'T12:00:00');
+    const dayName = DAYNAMES[date.getDay()];
+    const high    = Math.round(daily.temperature_2m_max[i]);
+    const finfo   = wmoInfo(daily.weather_code[i]);
+    fcHtml += `
+      <div class="fc-day">
+        <span class="fc-name">${dayName}</span>
+        <div class="fc-icon">${finfo.icon}</div>
+        <span class="fc-high">${high}°</span>
+      </div>`;
+  }
+  forecastEl.innerHTML = fcHtml;
+}
+
+async function fetchWeather() {
+  if (typeof MorningWeather !== 'object' || !MorningWeather) {
+    showWeatherError();
+    scheduleWeather(60 * 1000);
+    return;
+  }
+  var outcome;
+  try {
+    var data = await MorningWeather.load(weatherState);
+    outcome = MorningWeather.settle(weatherState, Date.now(), data, false);
+  } catch (e) {
+    outcome = MorningWeather.settle(weatherState, Date.now(), null, true);
+  }
+  if (outcome.paint) paintWeather(outcome.paint);
+  else if (outcome.error) showWeatherError();
+  scheduleWeather(outcome.retryMs);
 }
 
 /* ================================================================
@@ -2797,25 +2794,7 @@ function ensureCalendar() {
 renderCalendar();
 setInterval(ensureCalendar, 60 * 1000);
 
-let _weatherLat = null, _weatherLon = null;
-
-function initWeather() {
-  if (navigator.geolocation) {
-    navigator.geolocation.getCurrentPosition(
-      pos => {
-        _weatherLat = pos.coords.latitude;
-        _weatherLon = pos.coords.longitude;
-        fetchWeather(_weatherLat, _weatherLon);
-      },
-      () => fetchWeather()
-    );
-  } else {
-    fetchWeather();
-  }
-}
-
-initWeather();
-setInterval(() => fetchWeather(_weatherLat, _weatherLon), 10 * 60 * 1000);
+fetchWeather();
 
 /* ================================================================
    QUOTE SCREEN
