@@ -11,8 +11,8 @@
   var RETRY_MS = 60 * 1000;
   var STALE_MS = 2 * 60 * 60 * 1000;
   var BOARD_URL = '/weather.json';
-  var FORECAST_URL = 'https://api.open-meteo.com/v1/forecast?latitude=33.6695&longitude=-117.8231&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day&hourly=temperature_2m&daily=temperature_2m_max,weather_code,sunrise,sunset&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto&forecast_days=7&models=gfs_seamless';
-  var NOMINATIM_URL = 'https://nominatim.openstreetmap.org/reverse?lat=33.6695&lon=-117.8231&format=json';
+  var FORECAST_URL = 'https://api.open-meteo.com/v1/forecast?latitude=33.67&longitude=-117.82&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day&hourly=temperature_2m&daily=temperature_2m_max,weather_code,sunrise,sunset&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=auto&forecast_days=7&models=gfs_seamless';
+  var NOMINATIM_URL = 'https://nominatim.openstreetmap.org/reverse?lat=33.67&lon=-117.82&format=json';
 
   function state() {
     return { fetchedAt: 0, fromBoard: false };

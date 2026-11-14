@@ -77,8 +77,10 @@ async function main() {
   assert.strictEqual(data.current.temperature_2m, 72.2);
   assert.strictEqual(st.fromBoard, false);
   assert.strictEqual(fn.calls.length, 3);
-  assert.ok(fn.calls[1].indexOf('latitude=33.6695') !== -1);
-  assert.ok(fn.calls[1].indexOf('longitude=-117.8231') !== -1);
+  assert.ok(fn.calls[1].indexOf('latitude=33.67&') !== -1);
+  assert.ok(fn.calls[1].indexOf('longitude=-117.82&') !== -1);
+  assert.strictEqual(fn.calls[1].indexOf('33.66' + '9'), -1);
+  assert.strictEqual(fn.calls[1].indexOf('117.82' + '3'), -1);
   assert.ok(fn.calls[1].indexOf('models=gfs_seamless') !== -1);
   assert.strictEqual(fn.calls[1], weather.FORECAST_URL);
 

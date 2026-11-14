@@ -35,8 +35,8 @@ from urllib.parse import unquote, urlsplit
 PORT = 8780
 ROOT = Path(__file__).resolve().parents[1]
 QUOTES = Path.home() / "Library" / "Application Support" / "morning-board" / "quotes.json"
-DEFAULT_LAT = "33.6695"
-DEFAULT_LON = "-117.8231"
+DEFAULT_LAT = "33.67"
+DEFAULT_LON = "-117.82"
 WEATHER_TTL = 10 * 60
 WEATHER_TIMEOUT = 4
 WEATHER_MAX_BYTES = 1000000

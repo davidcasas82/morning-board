@@ -306,8 +306,10 @@ class BoardHostTests(unittest.TestCase):
 
     def test_forecast_url_matches_the_old_kiosk_request_and_times_out(self):
         self.assertLessEqual(serve.WEATHER_TIMEOUT, 5)
-        self.assertIn("latitude=33.6695", serve.FORECAST_URL)
-        self.assertIn("longitude=-117.8231", serve.FORECAST_URL)
+        self.assertIn("latitude=33.67&", serve.FORECAST_URL)
+        self.assertIn("longitude=-117.82&", serve.FORECAST_URL)
+        self.assertNotIn("33.66" + "9", serve.FORECAST_URL)
+        self.assertNotIn("117.82" + "3", serve.FORECAST_URL)
         for part in (
             "current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day",
             "hourly=temperature_2m",
@@ -344,7 +346,7 @@ class BoardHostTests(unittest.TestCase):
     def test_kiosk_reads_weather_from_the_board(self):
         kiosk = (ROOT / "kiosk.html").read_text(encoding="utf-8")
         weather = (ROOT / "weather.js").read_text(encoding="utf-8")
-        self.assertIn('src="weather.js?v=1"', kiosk)
+        self.assertIn('src="weather.js?v=2"', kiosk)
         self.assertIn("MorningWeather.load", kiosk)
         self.assertIn(serve.FORECAST_URL, weather)
         self.assertIn("'/weather.json'", weather)
@@ -353,6 +355,24 @@ class BoardHostTests(unittest.TestCase):
         self.assertIn("STALE_MS = 2 * 60 * 60 * 1000", weather)
         self.assertNotIn("geolocation", kiosk)
         self.assertNotIn("geolocation", weather)
+        self.assertNotIn("33.66" + "9", weather)
+        self.assertNotIn("117.82" + "3", weather)
+
+    def test_public_tree_has_no_house_level_weather_coordinates(self):
+        needles = ("33.66" + "9", "117.82" + "3")
+        hits = []
+        for path in ROOT.rglob("*"):
+            if not path.is_file():
+                continue
+            if any(part in path.parts for part in (".git", "node_modules", "__pycache__")):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if any(needle in text for needle in needles):
+                hits.append(str(path.relative_to(ROOT)))
+        self.assertEqual(hits, [])
 
     def test_only_board_files_are_served(self):
         with tempfile.TemporaryDirectory() as tmp:
