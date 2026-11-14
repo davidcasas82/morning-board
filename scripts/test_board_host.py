@@ -11,6 +11,7 @@ import re
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -32,8 +33,8 @@ pull = load("pull_board", "pull-board.py")
 
 
 class BoardHostTests(unittest.TestCase):
-    def start(self, root: Path, quotes: Path):
-        server = serve.bind(root, quotes, "127.0.0.1", 0)
+    def start(self, root: Path, quotes: Path, weather=None):
+        server = serve.bind(root, quotes, "127.0.0.1", 0, weather)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(server.shutdown)
@@ -140,6 +141,214 @@ class BoardHostTests(unittest.TestCase):
 
     def test_server_port_is_8780(self):
         self.assertEqual(serve.PORT, 8780)
+
+    def forecast(self, temp=72):
+        days = ["2026-11-14", "2026-11-15", "2026-11-16", "2026-11-17", "2026-11-18", "2026-11-19"]
+        return {
+            "current": {
+                "time": "2026-11-14T05:00",
+                "temperature_2m": temp,
+                "apparent_temperature": temp - 1,
+                "relative_humidity_2m": 40,
+                "wind_speed_10m": 5,
+                "weather_code": 1,
+                "is_day": 1,
+            },
+            "hourly": {
+                "time": ["2026-11-14T05:00", "2026-11-14T06:00"],
+                "temperature_2m": [temp, temp + 1],
+            },
+            "daily": {
+                "time": days,
+                "temperature_2m_max": [temp + 3, 76, 77, 78, 79, 80],
+                "weather_code": [1, 2, 3, 0, 1, 2],
+                "sunrise": ["2026-11-14T06:30"],
+                "sunset": ["2026-11-14T17:00"],
+            },
+        }
+
+    def weather_server(self, fetch, clock):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            root = directory / "checkout"
+            root.mkdir()
+            (root / "kiosk.html").write_text("clock", encoding="utf-8")
+            (root / "weather.json").write_text('{"secret":true}', encoding="utf-8")
+            weather = serve.WeatherSource(fetch=fetch, clock=clock)
+            port = self.start(root, directory / "quotes.json", weather)
+            yield port
+
+    def test_weather_cache_hit_skips_upstream(self):
+        clock = {"now": 1000000.0}
+        calls = {"n": 0}
+
+        def fetch():
+            calls["n"] += 1
+            return self.forecast()
+
+        ports = self.weather_server(fetch, lambda: clock["now"])
+        port = next(ports)
+        try:
+            with self.get(port, "/weather.json") as response:
+                self.assertEqual(response.status, 200)
+                self.assertIn("application/json", response.headers["Content-Type"])
+                body = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(body["current"]["temperature_2m"], 72)
+            self.assertEqual(body["age_seconds"], 0)
+            self.assertEqual(body["city"], "Irvine, California")
+            self.assertNotIn("secret", body)
+            clock["now"] += 120
+            with self.get(port, "/weather.json") as response:
+                body = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(body["age_seconds"], 120)
+            self.assertEqual(body["current"]["temperature_2m"], 72)
+            self.assertEqual(calls["n"], 1)
+        finally:
+            ports.close()
+
+    def test_weather_upstream_failure_serves_the_cached_copy(self):
+        clock = {"now": 1000000.0}
+        calls = {"n": 0}
+
+        def fetch():
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise OSError("upstream down")
+            return self.forecast(temp=68)
+
+        ports = self.weather_server(fetch, lambda: clock["now"])
+        port = next(ports)
+        try:
+            with self.get(port, "/weather.json") as response:
+                self.assertEqual(json.loads(response.read().decode("utf-8"))["current"]["temperature_2m"], 68)
+            clock["now"] += serve.WEATHER_TTL + 45
+            with self.get(port, "/weather.json") as response:
+                self.assertEqual(response.status, 200)
+                body = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(body["current"]["temperature_2m"], 68)
+            self.assertEqual(body["age_seconds"], serve.WEATHER_TTL + 45)
+            self.assertEqual(body["city"], "Irvine, California")
+            self.assertEqual(calls["n"], 2)
+        finally:
+            ports.close()
+
+    def test_weather_upstream_failure_without_cache_is_an_error(self):
+        def fetch():
+            raise OSError("upstream down")
+
+        ports = self.weather_server(fetch, time.time)
+        port = next(ports)
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                self.get(port, "/weather.json")
+            self.assertEqual(raised.exception.code, 502)
+            self.assertEqual(json.loads(raised.exception.read().decode("utf-8")), {"error": "weather unavailable"})
+            with self.get(port, "/kiosk.html") as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.read(), b"clock")
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                self.get(port, "/weather.json")
+            self.assertEqual(raised.exception.code, 502)
+        finally:
+            ports.close()
+
+    def test_slow_weather_fetch_does_not_block_the_board(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def fetch():
+            started.set()
+            release.wait(5)
+            return self.forecast()
+
+        ports = self.weather_server(fetch, time.time)
+        port = next(ports)
+        try:
+            def hit_weather():
+                with self.get(port, "/weather.json") as response:
+                    response.read()
+
+            thread = threading.Thread(target=hit_weather)
+            thread.start()
+            self.assertTrue(started.wait(2))
+            with urllib.request.urlopen("http://127.0.0.1:%s/kiosk.html" % port, timeout=2) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.read(), b"clock")
+            release.set()
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+        finally:
+            release.set()
+            ports.close()
+
+    def test_hung_upstream_times_out(self):
+        import socket
+
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        self.addCleanup(sock.close)
+        port = sock.getsockname()[1]
+
+        def hold():
+            try:
+                conn, _ = sock.accept()
+            except OSError:
+                return
+            time.sleep(30)
+            conn.close()
+
+        threading.Thread(target=hold, daemon=True).start()
+        started = time.time()
+        with self.assertRaises(Exception):
+            serve.fetch_forecast(url="http://127.0.0.1:%s/v1/forecast" % port)
+        self.assertLess(time.time() - started, serve.WEATHER_TIMEOUT + 2)
+
+    def test_forecast_url_matches_the_old_kiosk_request_and_times_out(self):
+        self.assertLessEqual(serve.WEATHER_TIMEOUT, 5)
+        self.assertIn("latitude=33.6695", serve.FORECAST_URL)
+        self.assertIn("longitude=-117.8231", serve.FORECAST_URL)
+        for part in (
+            "current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day",
+            "hourly=temperature_2m",
+            "daily=temperature_2m_max,weather_code,sunrise,sunset",
+            "temperature_unit=fahrenheit",
+            "wind_speed_unit=mph",
+            "timezone=auto",
+            "forecast_days=7",
+            "models=gfs_seamless",
+        ):
+            self.assertIn(part, serve.FORECAST_URL)
+        seen = {}
+
+        class Resp:
+            def read(self, n):
+                return b'{"current":{},"daily":{},"hourly":{}}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def opener(req, data=None, timeout=None):
+            seen["timeout"] = timeout
+            seen["url"] = req.full_url
+            return Resp()
+
+        data = serve.fetch_forecast(opener=opener)
+        self.assertEqual(seen["timeout"], serve.WEATHER_TIMEOUT)
+        self.assertEqual(seen["url"], serve.FORECAST_URL)
+        self.assertIn("current", data)
+
+    def test_kiosk_reads_weather_from_the_board(self):
+        text = (ROOT / "kiosk.html").read_text(encoding="utf-8")
+        self.assertIn("'/weather.json'", text)
+        self.assertIn("WEATHER_RETRY_MS = 60 * 1000", text)
+        self.assertIn("WEATHER_STALE_MS = 2 * 60 * 60 * 1000", text)
+        self.assertNotIn("api.open-meteo.com", text)
+        self.assertNotIn("nominatim.openstreetmap.org", text)
+        self.assertNotIn("geolocation", text)
 
     def test_only_board_files_are_served(self):
         with tempfile.TemporaryDirectory() as tmp:
