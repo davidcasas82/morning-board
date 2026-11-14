@@ -7,6 +7,7 @@
 <title>Morning board</title>
 <script src="daily.js?v=19"></script>
 <script src="quotes.js?v=20"></script>
+<script src="weather.js?v=1"></script>
 <script>
 /* Style, day/night, and color before first paint.
    Each Pacific board day (local Pacific time minus 3 hours, from 3:00 AM)
@@ -2634,12 +2635,8 @@ function wmoInfo(code, isDay = true, when = new Date()) {
   return info;
 }
 
-const WEATHER_REFRESH_MS = 10 * 60 * 1000;
-const WEATHER_RETRY_MS = 60 * 1000;
-const WEATHER_STALE_MS = 2 * 60 * 60 * 1000;
-
 let weatherTimer = null;
-let weatherFetchedAt = 0;
+let weatherState = { fetchedAt: 0, fromBoard: false };
 
 function scheduleWeather(delay) {
   if (weatherTimer) clearTimeout(weatherTimer);
@@ -2660,21 +2657,6 @@ function showWeatherError() {
   document.getElementById('high').textContent = '—';
   document.getElementById('weather-city').textContent = '';
   document.getElementById('forecast-row').innerHTML = '';
-}
-
-async function loadBoardWeather() {
-  const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
-  const abortTimer = ctrl ? setTimeout(function () { ctrl.abort(); }, 8000) : null;
-  try {
-    const res = await fetch('/weather.json', {
-      cache: 'no-store',
-      signal: ctrl ? ctrl.signal : undefined
-    });
-    if (!res.ok) throw new Error('weather ' + res.status);
-    return await res.json();
-  } finally {
-    if (abortTimer) clearTimeout(abortTimer);
-  }
 }
 
 function paintWeather(data) {
@@ -2750,21 +2732,21 @@ function paintWeather(data) {
 }
 
 async function fetchWeather() {
-  try {
-    const data = await loadBoardWeather();
-    const age = Number(data.age_seconds);
-    if (!Number.isFinite(age) || age < 0 || age * 1000 > WEATHER_STALE_MS) {
-      throw new Error('stale weather');
-    }
-    paintWeather(data);
-    weatherFetchedAt = Date.now() - age * 1000;
-    scheduleWeather(WEATHER_REFRESH_MS);
-  } catch (e) {
-    if (!weatherFetchedAt || Date.now() - weatherFetchedAt > WEATHER_STALE_MS) {
-      showWeatherError();
-    }
-    scheduleWeather(WEATHER_RETRY_MS);
+  if (typeof MorningWeather !== 'object' || !MorningWeather) {
+    showWeatherError();
+    scheduleWeather(60 * 1000);
+    return;
   }
+  var outcome;
+  try {
+    var data = await MorningWeather.load(weatherState);
+    outcome = MorningWeather.settle(weatherState, Date.now(), data, false);
+  } catch (e) {
+    outcome = MorningWeather.settle(weatherState, Date.now(), null, true);
+  }
+  if (outcome.paint) paintWeather(outcome.paint);
+  else if (outcome.error) showWeatherError();
+  scheduleWeather(outcome.retryMs);
 }
 
 /* ================================================================

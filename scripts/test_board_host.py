@@ -342,13 +342,17 @@ class BoardHostTests(unittest.TestCase):
         self.assertIn("current", data)
 
     def test_kiosk_reads_weather_from_the_board(self):
-        text = (ROOT / "kiosk.html").read_text(encoding="utf-8")
-        self.assertIn("'/weather.json'", text)
-        self.assertIn("WEATHER_RETRY_MS = 60 * 1000", text)
-        self.assertIn("WEATHER_STALE_MS = 2 * 60 * 60 * 1000", text)
-        self.assertNotIn("api.open-meteo.com", text)
-        self.assertNotIn("nominatim.openstreetmap.org", text)
-        self.assertNotIn("geolocation", text)
+        kiosk = (ROOT / "kiosk.html").read_text(encoding="utf-8")
+        weather = (ROOT / "weather.js").read_text(encoding="utf-8")
+        self.assertIn('src="weather.js?v=1"', kiosk)
+        self.assertIn("MorningWeather.load", kiosk)
+        self.assertIn(serve.FORECAST_URL, weather)
+        self.assertIn("'/weather.json'", weather)
+        self.assertIn("nominatim.openstreetmap.org", weather)
+        self.assertIn("RETRY_MS = 60 * 1000", weather)
+        self.assertIn("STALE_MS = 2 * 60 * 60 * 1000", weather)
+        self.assertNotIn("geolocation", kiosk)
+        self.assertNotIn("geolocation", weather)
 
     def test_only_board_files_are_served(self):
         with tempfile.TemporaryDirectory() as tmp:
