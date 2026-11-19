@@ -2327,7 +2327,10 @@ def netcheck(targets: List[tuple], alert_path, log: Callable, now: dt.datetime, 
 #
 # A local stand-in for the old alert-check routine. It reads logs, state, the
 # run-days file, and the kids-tv job plist. It never opens a TV or a speaker,
-# and it never reads ~/.config/vizio. Morning slots are due from
+# and it never reads ~/.config/vizio. A later healthy netcheck resolves open
+# netcheck alerts, and a later successful Sonos sync resolves that room's open
+# sonos-sync alert. Resolved alerts stay in the file with the time and the
+# reason. The ack file is not written. Morning slots are due from
 # resolved_day_times: on at alarm + ON_CHECK_AFTER, off at leaveBy + OFF_GRACE,
 # each once per day. Evening is a separate 20:45 run.
 
@@ -2777,31 +2780,193 @@ def _write_status(path, payload: dict) -> None:
 
 
 def _webhook_url(path):
-    """(url or None, error or None). A missing file is no webhook. A mode other than 0600 is not read."""
+    """(url or None, key or None, error or None).
+
+    A missing file is no webhook. A mode other than 0600 is not read.
+    WEBHOOK_KEY is the bearer token. Callers must not log it.
+    """
     path = Path(path)
     if not path.is_file():
-        return None, None
+        return None, None, None
     if stat.S_IMODE(path.stat().st_mode) != 0o600:
-        return None, "the webhook file is not chmod 600, so it was not read and nothing was sent"
+        return None, None, "the webhook file is not chmod 600, so it was not read and nothing was sent"
     url = None
+    key = None
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         if "=" in line:
-            key, _, value = line.partition("=")
-            if key.strip() in ("WEBHOOK_URL", "URL"):
-                url = value.strip().strip("\"'")
+            name, _, value = line.partition("=")
+            value = value.strip().strip("\"'")
+            if name.strip() in ("WEBHOOK_URL", "URL"):
+                url = value or None
+            elif name.strip() == "WEBHOOK_KEY" and value:
+                key = value
         elif line.startswith("https://") or line.startswith("http://"):
             url = line
-    return (url or None), None
+    return (url or None), key, None
 
 
-def _post_json(url: str, payload: dict) -> None:
+def _post_json(url: str, payload: dict, key: str) -> None:
     body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    request = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + key})
     with urllib.request.urlopen(request, timeout=10) as response:
         response.read()
+
+
+def _webhook_secrets(url: str, key: str) -> List[str]:
+    """Pieces of the webhook that must not be written into a log or the status file."""
+    found = []
+    if key:
+        found.append(key)
+        found.append("Bearer " + key)
+    if not url:
+        return found
+    found.append(url)
+    parts = urllib.parse.urlsplit(url)
+    if parts.username:
+        found.append(urllib.parse.unquote(parts.username))
+    if parts.password:
+        found.append(urllib.parse.unquote(parts.password))
+    if parts.netloc:
+        found.append(parts.netloc)
+    if parts.scheme and parts.netloc:
+        found.append("%s://%s" % (parts.scheme, parts.netloc))
+    for _name, value in urllib.parse.parse_qsl(parts.query, keep_blank_values=False):
+        if value:
+            found.append(value)
+    return found
+
+
+def _scrub_secrets(text: str, secrets: List[str]) -> str:
+    for secret in sorted({item for item in secrets if item}, key=len, reverse=True):
+        text = text.replace(secret, "<redacted>")
+    return text
+
+
+def _webhook_http_note(exc, url: str, key: str) -> str:
+    """HTTP status and a short response snippet. The key, the URL, and the request stay out."""
+    raw = b""
+    try:
+        raw = exc.read() or b""
+    except Exception:
+        raw = b""
+    text = raw if isinstance(raw, str) else bytes(raw).decode("utf-8", "replace")
+    snippet = _scrub_secrets(" ".join(text.split()), _webhook_secrets(url, key))[:80]
+    if snippet:
+        return "the webhook was not sent: HTTP %s %s" % (exc.code, snippet)
+    return "the webhook was not sent: HTTP %s" % exc.code
+
+
+def _record_webhook_note(args, payload, evidence, reason, note, log=None) -> None:
+    """Save a webhook failure on the status and print it.
+
+    The job log is scanned for the word "error", so a response body is not
+    appended there. The missing-key line has no secret and is logged.
+    """
+    payload["evidence"] = list(evidence) + [note]
+    payload["reason"] = reason + "; " + note
+    _write_status(args.status, payload)
+    print(note)
+    if log is not None and note == "webhook key missing":
+        log(note)
+
+
+def _alert_is_resolved(item) -> bool:
+    resolved = item.get("resolved") if isinstance(item, dict) else None
+    return isinstance(resolved, dict) and bool(resolved.get("at"))
+
+
+def _alert_opened(item, zone):
+    raw = item.get("at") if isinstance(item, dict) else None
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        stamp = dt.datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=zone)
+    return stamp
+
+
+def _earliest_after(rows, opened, accept):
+    found = None
+    for stamp, message, raw in rows or []:
+        if stamp <= opened or not accept(message):
+            continue
+        if found is None or stamp < found[0]:
+            found = (stamp, message, raw)
+    return found
+
+
+def _sync_line_ok(message: str, room: str) -> bool:
+    match = _SYNC_LINE.match(message)
+    return bool(match and match.group(1) == room)
+
+
+def _acked_alert_ids(alert_path):
+    try:
+        acked = json.loads(alert_ack_path(alert_path).read_text(encoding="utf-8")).get("acked", {})
+    except (OSError, ValueError, AttributeError):
+        return set()
+    if not isinstance(acked, dict):
+        return set()
+    return set(acked)
+
+
+def _resolve_recovered_alerts(alert_path, zone, net_lines, job_lines) -> None:
+    """Mark open netcheck and sonos-sync alerts resolved when a later check succeeded.
+
+    Resolved entries stay in the alert file, with the time and the reason.
+    Nothing is deleted, and the ack file is not written. A netcheck is healthy
+    by the same rule as the rest of this check: every expected target is ok.
+    A sonos-sync alert is resolved only for boys-room or girls-room.
+    """
+    path = Path(alert_path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict) or not isinstance(data.get("alerts"), list):
+        return
+    acked = _acked_alert_ids(path)
+    changed = False
+    for item in data["alerts"]:
+        if not isinstance(item, dict) or _alert_is_resolved(item) or alert_id(item) in acked:
+            continue
+        opened = _alert_opened(item, zone)
+        if opened is None:
+            continue
+        step = item.get("step")
+        room = item.get("tv")
+        if step == "netcheck":
+            later = _earliest_after(net_lines, opened, netcheck_line_ok)
+            if later is None:
+                continue
+            text = later[1].strip()
+            reason = "later netcheck: " + text if _TARGETS_OK.fullmatch(text) else "later netcheck: every target ok"
+        elif step == "sonos-sync" and room in TVS:
+            later = _earliest_after(job_lines, opened, lambda message, room=room: _sync_line_ok(message, room))
+            if later is None:
+                continue
+            reason = "later sonos sync for %s succeeded" % room
+        else:
+            continue
+        item["resolved"] = {"at": later[0].isoformat(timespec="seconds"), "reason": reason}
+        changed = True
+    if not changed:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        return
 
 
 def _healthcheck_run(args, log) -> int:
@@ -2845,6 +3010,7 @@ def _healthcheck_run(args, log) -> int:
         evidence.extend(item for item in slot_evidence if item not in evidence)
         if reason and not slot_problems:
             reasons.append(reason)
+    _resolve_recovered_alerts(alert_path, zone, read_stamp_lines(args.netcheck_log, zone), lines)
     alert_ids = []
     try:
         pending = _unacked_alerts(alert_path)
@@ -2852,6 +3018,8 @@ def _healthcheck_run(args, log) -> int:
         problems.append(str(exc))
         pending = []
     for item in pending:
+        if _alert_is_resolved(item):
+            continue
         if broken and item.get("tv") == "schedule" and item.get("step") == "times":
             continue
         # A first-try alert for a step that later succeeded is not the result.
@@ -2893,7 +3061,7 @@ def _healthcheck_run(args, log) -> int:
     previous = _json_object(sent_path) or {}
     if previous.get("fingerprint") == fingerprint:
         return 1
-    url, webhook_error = _webhook_url(args.webhook)
+    url, webhook_key, webhook_error = _webhook_url(args.webhook)
     if webhook_error:
         payload["evidence"] = evidence + [webhook_error]
         payload["reason"] = reason + "; " + webhook_error
@@ -2901,14 +3069,20 @@ def _healthcheck_run(args, log) -> int:
         return 1
     if not url:
         return 1
+    if not webhook_key:
+        _record_webhook_note(args, payload, evidence, reason, "webhook key missing", log)
+        return 1
+    body = {"evidence": evidence, "reason": reason, "result": result, "slot": slot_name,
+            "alert_ids": alert_ids}
     try:
-        _post_json(url, {"evidence": evidence, "reason": reason, "result": result, "slot": slot_name,
-                         "alert_ids": alert_ids})
+        _post_json(url, body, webhook_key)
+    except urllib.error.HTTPError as exc:
+        # Status and a short snippet only. The key, the URL, and the request body stay out.
+        _record_webhook_note(args, payload, evidence, reason, _webhook_http_note(exc, url, webhook_key))
+        return 1
     except Exception as exc:  # the URL is not included; delivery is retried next time
-        note = "the webhook was not sent: %s" % exc.__class__.__name__
-        payload["evidence"] = evidence + [note]
-        payload["reason"] = reason + "; " + note
-        _write_status(args.status, payload)
+        _record_webhook_note(args, payload, evidence, reason,
+                             "the webhook was not sent: %s" % exc.__class__.__name__)
         return 1
     sent_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = sent_path.with_suffix(".tmp")
