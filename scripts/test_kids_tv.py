@@ -3077,6 +3077,29 @@ class HealthcheckTests(unittest.TestCase):
                 "girls-room": {"room": "Not A Real Room Two", "ip": "10.9.8.8", "alarm_id": "12"},
             }}}))
 
+    def write_webhook(self, key="fixture-webhook-key"):
+        self.webhook.write_text("WEBHOOK_URL=https://alerts.example.test/hook\nWEBHOOK_KEY=%s\n" % key)
+        os.chmod(self.webhook, 0o600)
+
+    def _webhook_key(self):
+        if not self.webhook.is_file():
+            return ""
+        for raw in self.webhook.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if line.startswith("WEBHOOK_KEY="):
+                return line.split("=", 1)[1].strip().strip("\"'")
+        return ""
+
+    def write_blip_alerts(self):
+        self.alert.write_text(json.dumps({"alerts": [
+            {"date": "2026-11-14", "tv": "all", "step": "netcheck",
+             "error": "no route", "at": "2026-11-14T11:20:00-08:00"},
+            {"date": "2026-11-14", "tv": "boys-room", "step": "sonos-sync",
+             "error": "no route", "at": "2026-11-14T11:21:00-08:00"},
+            {"date": "2026-11-14", "tv": "girls-room", "step": "sonos-sync",
+             "error": "no route", "at": "2026-11-14T11:22:00-08:00"},
+        ]}))
+
     def invoke(self, slot, now, urlopen=None, extra=()):
         args = ["--config", str(self.config), "--config-dir", str(self.vizio),
                 "--log", str(self.log), "--state", str(self.state), "--alert", str(self.alert),
@@ -3098,10 +3121,15 @@ class HealthcheckTests(unittest.TestCase):
                 mock.patch.object(kt.socket, "create_connection", side_effect=AssertionError("tv")):
             rc = kt.main(args)
         blob = out.getvalue() + err.getvalue() + (self.status.read_text(encoding="utf-8") if self.status.exists() else "")
+        logged = self.log.read_text(encoding="utf-8") if self.log.exists() else ""
         self.assertNotIn("SECRETTOKEN", blob)
         self.assertNotIn("10.9.8.7", blob)
         self.assertNotIn("10.1.2.3", blob)
         self.assertNotIn("Not A Real Room", blob)
+        webhook_key = self._webhook_key()
+        if webhook_key:
+            self.assertNotIn(webhook_key, blob)
+            self.assertNotIn(webhook_key, logged)
         status = json.loads(self.status.read_text(encoding="utf-8")) if self.status.exists() else None
         return rc, out.getvalue(), status
 
@@ -3414,8 +3442,7 @@ class HealthcheckTests(unittest.TestCase):
         rc, _out, status = self.invoke("morning-on", "2026-10-29T06:10:00")
         self.assertEqual((rc, status["result"]), (0, "pass"))
         self.assertIn("boys-room and girls-room", status["reason"])
-        self.webhook.write_text("WEBHOOK_URL=https://alerts.example.test/hook\n")
-        os.chmod(self.webhook, 0o600)
+        self.write_webhook()
         posted = []
 
         class Resp:
@@ -3430,6 +3457,7 @@ class HealthcheckTests(unittest.TestCase):
 
         def urlopen(request, timeout=10):
             posted.append(json.loads(request.data.decode("utf-8")))
+            self.assertEqual(request.get_header("Authorization"), "Bearer fixture-webhook-key")
             return Resp()
 
         self.write_log("2026-10-29 06:08:00 boys-room: power on sent",
@@ -3447,6 +3475,9 @@ class HealthcheckTests(unittest.TestCase):
     def test_six_target_netcheck_is_healthy_without_sonos(self):
         self.write_run_days(dt.datetime(2026, 10, 29, 6, 20, tzinfo=LA))
         self.write_net("2026-10-29 06:00:00 6 targets ok")
+        self.alert.write_text(json.dumps({"alerts": [{
+            "date": "2026-10-29", "tv": "all", "step": "netcheck",
+            "error": "no route", "at": "2026-10-29T05:00:00-07:00"}]}))
         self.write_log("2026-10-29 06:18:00 boys-room: power on sent",
                        "2026-10-29 06:18:01 girls-room: power on sent",
                        "2026-10-29 06:19:00 boys-room: cast sent",
@@ -3454,13 +3485,18 @@ class HealthcheckTests(unittest.TestCase):
         rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00")
         self.assertEqual((rc, status["result"]), (0, "pass"))
         self.assertIn("6 targets ok", " ".join(status["evidence"]))
+        saved = json.loads(self.alert.read_text(encoding="utf-8"))["alerts"]
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["error"], "no route")
+        self.assertEqual(saved[0]["resolved"], {
+            "at": "2026-10-29T06:00:00-07:00", "reason": "later netcheck: 6 targets ok"})
+        self.assertFalse((self.dir / "kids-tv-alert-ack.json").exists())
 
     def test_webhook_posts_once_acks_delivered_ids_and_stays_quiet_without_one(self):
         self.write_run_days(dt.datetime(2026, 10, 29, 6, 20, tzinfo=LA))
         self.write_net("2026-10-29 06:00:00 8 targets ok")
         self.write_log("2026-10-29 06:00:00 boys-room: power on sent")
-        self.webhook.write_text("WEBHOOK_URL=https://alerts.example.test/hook\n")
-        os.chmod(self.webhook, 0o600)
+        self.write_webhook()
         posted = []
 
         class Resp:
@@ -3474,14 +3510,17 @@ class HealthcheckTests(unittest.TestCase):
                 return False
 
         def urlopen(request, timeout=10):
-            posted.append((request.full_url, json.loads(request.data.decode("utf-8"))))
+            posted.append((request.full_url, json.loads(request.data.decode("utf-8")),
+                           request.get_header("Authorization")))
             return Resp()
 
         rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00", urlopen=urlopen)
         self.assertEqual(rc, 1)
         self.assertEqual(len(posted), 1)
         self.assertEqual(posted[0][0], "https://alerts.example.test/hook")
+        self.assertEqual(posted[0][2], "Bearer fixture-webhook-key")
         self.assertNotIn("SECRETTOKEN", json.dumps(posted[0][1]))
+        self.assertNotIn("fixture-webhook-key", json.dumps(posted[0][1]))
         rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00", urlopen=urlopen)
         self.assertEqual(rc, 1)
         self.assertEqual(len(posted), 1)
@@ -3498,6 +3537,7 @@ class HealthcheckTests(unittest.TestCase):
         rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00", urlopen=urlopen)
         self.assertIn("2026-10-29/boys-room/on", status["reason"])
         self.assertEqual(len(posted), 3)
+        self.assertTrue(all(item[2] == "Bearer fixture-webhook-key" for item in posted))
         self.assertEqual(json.loads(ack_path.read_text(encoding="utf-8"))["acked"],
                          {"leave-this": "2026-10-29T00:00:00-07:00"})
 
@@ -3530,6 +3570,91 @@ class HealthcheckTests(unittest.TestCase):
         rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00")
         self.assertEqual(rc, 1)
         self.assertIn("chmod 600", status["reason"])
+
+    def test_a_blip_fails_until_a_later_netcheck_and_syncs_clear_it(self):
+        self.sonos()
+        when = dt.datetime(2026, 11, 14, 20, 45, tzinfo=LA)
+        self.write_run_days(when)
+        self.write_blip_alerts()
+        self.write_net("2026-11-14 11:00:00 8 targets ok\n"
+                       "2026-11-14 11:20:00 netcheck: boys-room cast:8009 no route\n")
+        self.write_log(
+            "2026-11-14 11:21:00 boys-room: sonos alarm for 2026-11-15 failed, try 1 of 4: timed out",
+            "2026-11-14 11:22:00 girls-room: sonos alarm for 2026-11-15 failed, try 1 of 4: timed out")
+        rc, _out, status = self.invoke("evening", "2026-11-14T20:45:00")
+        self.assertEqual((rc, status["result"]), (1, "fail"))
+        self.assertIn("2026-11-14/all/netcheck", status["reason"])
+        self.assertIn("2026-11-14/boys-room/sonos-sync", status["reason"])
+        self.assertIn("2026-11-14/girls-room/sonos-sync", status["reason"])
+        open_alerts = json.loads(self.alert.read_text(encoding="utf-8"))["alerts"]
+        self.assertEqual(len(open_alerts), 3)
+        self.assertTrue(all("resolved" not in item for item in open_alerts))
+        self.assertFalse((self.dir / "kids-tv-alert-ack.json").exists())
+
+        self.write_net("2026-11-14 11:20:00 netcheck: boys-room cast:8009 no route\n"
+                       "2026-11-14 11:51:00 8 targets ok\n")
+        self.write_log(
+            "2026-11-14 11:21:00 boys-room: sonos alarm for 2026-11-15 failed, try 1 of 4: timed out",
+            "2026-11-14 11:22:00 girls-room: sonos alarm for 2026-11-15 failed, try 1 of 4: timed out",
+            "2026-11-14 20:40:00 boys-room: sonos alarm for 2026-11-15: already off",
+            "2026-11-14 20:40:01 girls-room: sonos alarm for 2026-11-15: already off")
+        rc, _out, status = self.invoke("evening", "2026-11-14T20:45:00")
+        self.assertEqual((rc, status["result"]), (0, "pass"), status)
+        self.assertNotIn("unacknowledged", status["reason"])
+        saved = json.loads(self.alert.read_text(encoding="utf-8"))["alerts"]
+        self.assertEqual([(item["tv"], item["step"]) for item in saved],
+                         [("all", "netcheck"), ("boys-room", "sonos-sync"), ("girls-room", "sonos-sync")])
+        by_alert = {(item["tv"], item["step"]): item for item in saved}
+        self.assertEqual(by_alert[("all", "netcheck")]["error"], "no route")
+        self.assertEqual(by_alert[("all", "netcheck")]["resolved"], {
+            "at": "2026-11-14T11:51:00-08:00", "reason": "later netcheck: 8 targets ok"})
+        self.assertEqual(by_alert[("boys-room", "sonos-sync")]["resolved"], {
+            "at": "2026-11-14T20:40:00-08:00", "reason": "later sonos sync for boys-room succeeded"})
+        self.assertEqual(by_alert[("girls-room", "sonos-sync")]["resolved"], {
+            "at": "2026-11-14T20:40:01-08:00", "reason": "later sonos sync for girls-room succeeded"})
+        self.assertNotIn("Not A Real Room", json.dumps(saved))
+        self.assertFalse((self.dir / "kids-tv-alert-ack.json").exists())
+
+    def test_webhook_failure_logs_http_status_and_snippet_without_the_key(self):
+        self.write_run_days(dt.datetime(2026, 10, 29, 6, 20, tzinfo=LA))
+        self.write_net("2026-10-29 06:00:00 8 targets ok")
+        self.write_log("2026-10-29 06:00:00 boys-room: power on sent")
+        self.write_webhook()
+
+        def boom(request, timeout=10):
+            self.assertEqual(request.get_header("Authorization"), "Bearer fixture-webhook-key")
+            self.assertNotIn("fixture-webhook-key", request.data.decode("utf-8"))
+            raise urllib.error.HTTPError(
+                request.full_url, 401, "Unauthorized", {},
+                io.BytesIO(b"rejected fixture-webhook-key please retry"))
+
+        rc, out, status = self.invoke("morning-on", "2026-10-29T06:20:00", urlopen=boom)
+        self.assertEqual(rc, 1)
+        note = out + "\n" + status["reason"] + "\n" + " ".join(status["evidence"])
+        self.assertIn("HTTP 401", note)
+        self.assertIn("please retry", note)
+        self.assertNotIn("fixture-webhook-key", note)
+        self.assertNotIn("alerts.example.test", status["reason"] + " ".join(status["evidence"]))
+        self.assertNotIn("fixture-webhook-key", self.log.read_text(encoding="utf-8"))
+        self.assertFalse((self.dir / "kids-tv-alert-ack.json").exists())
+
+    def test_missing_webhook_key_is_logged_and_not_sent(self):
+        self.write_run_days(dt.datetime(2026, 10, 29, 6, 20, tzinfo=LA))
+        self.write_net("2026-10-29 06:00:00 8 targets ok")
+        self.write_log("2026-10-29 06:00:00 boys-room: power on sent")
+        self.webhook.write_text("WEBHOOK_URL=https://alerts.example.test/hook\n")
+        os.chmod(self.webhook, 0o600)
+
+        def urlopen(request, timeout=10):
+            raise AssertionError("posted without a key")
+
+        rc, out, status = self.invoke("morning-on", "2026-10-29T06:20:00", urlopen=urlopen)
+        self.assertEqual(rc, 1)
+        self.assertIn("webhook key missing", out)
+        self.assertIn("webhook key missing", status["reason"])
+        self.assertIn("webhook key missing", self.log.read_text(encoding="utf-8"))
+        self.assertNotIn("alerts.example.test", out + status["reason"] + " ".join(status["evidence"]))
+        self.assertFalse((self.dir / "kids-tv-alert-ack.json").exists())
 
     def test_healthcheck_plists_cover_the_interval_and_the_evening(self):
         morning = plistlib.loads((ROOT / "launchd" / "com.davidcasas.morningboard.kids-tv-healthcheck.plist").read_bytes())
