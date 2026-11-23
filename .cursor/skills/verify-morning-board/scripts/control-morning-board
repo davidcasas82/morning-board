@@ -1,0 +1,702 @@
+#!/usr/bin/env node
+// Drive the morning-board static kiosk for verification.
+// Launch, doctor, browser, and cleanup. Kills only processes this run started.
+import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
+import http from 'node:http';
+import { createHash, randomBytes } from 'node:crypto';
+import { openSync, closeSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, readdirSync, statSync } from 'node:fs';
+import { dirname, resolve, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_ROOT = resolve(SCRIPT_DIR, '../../../..');
+const BASE = process.env.MORNING_BOARD_BASE || '/tmp/morning-board-verify';
+const ACTIVE_FILE = join(BASE, 'active-run-id');
+
+function die(message) {
+  process.stderr.write(message.replace(/\n?$/, '\n'));
+  process.exit(1);
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function argValue(argv, name) {
+  const i = argv.indexOf(name);
+  if (i === -1) return null;
+  const v = argv[i + 1];
+  if (v === undefined || v.startsWith('--')) die(`missing value for ${name}`);
+  return v;
+}
+
+function hasFlag(argv, name) {
+  return argv.includes(name);
+}
+
+function repoRoot() {
+  const root = resolve(process.env.MORNING_BOARD_ROOT || DEFAULT_ROOT);
+  if (!existsSync(join(root, 'kiosk.html')) || !existsSync(join(root, 'index.html'))) {
+    die(`repo root ${root} has no index.html and kiosk.html`);
+  }
+  return root;
+}
+
+function runIdFromArgs(argv) {
+  return argValue(argv, '--run') || process.env.MORNING_BOARD_RUN_ID || '';
+}
+
+function stateDirFor(runId) {
+  return join(BASE, runId);
+}
+
+function evidenceDirFor(runId) {
+  return process.env.MORNING_BOARD_EVIDENCE_DIR
+    ? resolve(process.env.MORNING_BOARD_EVIDENCE_DIR)
+    : join(stateDirFor(runId), 'evidence');
+}
+
+function readRun(argv) {
+  let runId = runIdFromArgs(argv);
+  if (!runId && existsSync(ACTIVE_FILE)) runId = readFileSync(ACTIVE_FILE, 'utf8').trim();
+  if (!runId) die('no run id. launch first, then export MORNING_BOARD_RUN_ID or pass --run');
+  const stateDir = stateDirFor(runId);
+  const runPath = join(stateDir, 'run.json');
+  if (!existsSync(runPath)) die(`no run.json for ${runId} at ${runPath}`);
+  const run = JSON.parse(readFileSync(runPath, 'utf8'));
+  return run;
+}
+
+function freePort() {
+  return new Promise((resolvePort, reject) => {
+    const server = createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      server.close(() => resolvePort(port));
+    });
+  });
+}
+
+function httpGet(url) {
+  return new Promise((resolveRes, reject) => {
+    const req = http.get(url, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        resolveRes({ status: res.statusCode, body: Buffer.concat(chunks) });
+      });
+    });
+    req.setTimeout(4000, () => {
+      req.destroy(new Error('timeout'));
+    });
+    req.on('error', reject);
+  });
+}
+
+function isAlive(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function cmdline(pid) {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`).toString('utf8').replaceAll('\0', ' ').trim();
+  } catch {
+    return '';
+  }
+}
+
+function parentPid(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const m = stat.match(/\)\s+\S+\s+(\d+)/);
+    return m ? Number(m[1]) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function isSelfOrDescendant(pid, ancestor) {
+  let cur = Number(pid);
+  for (let i = 0; i < 25 && cur > 1; i += 1) {
+    if (cur === ancestor) return true;
+    cur = parentPid(cur);
+  }
+  return false;
+}
+
+function listenPids(port) {
+  return new Promise((resolvePids) => {
+    const child = spawn('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    child.stdout.on('data', (c) => { out += c; });
+    child.on('close', () => {
+      const pids = out.split(/\s+/).map((s) => Number(s)).filter((n) => n > 0);
+      resolvePids(pids);
+    });
+    child.on('error', () => resolvePids([]));
+  });
+}
+
+function spawnLogged(command, args, logPath) {
+  const fd = openSync(logPath, 'a');
+  const child = spawn(command, args, {
+    detached: true,
+    stdio: ['ignore', fd, fd],
+  });
+  child.unref();
+  closeSync(fd);
+  return child.pid;
+}
+
+function killGroup(pid) {
+  if (!pid || !isAlive(pid)) return;
+  try { process.kill(-pid, 'SIGTERM'); } catch { /* group may already be gone */ }
+  try { process.kill(pid, 'SIGTERM'); } catch { /* process may already be gone */ }
+}
+
+async function killRecorded(run) {
+  killGroup(run.chromePid);
+  killGroup(run.serverPid);
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline && (isAlive(run.chromePid) || isAlive(run.serverPid))) {
+    await sleep(100);
+  }
+  if (isAlive(run.chromePid)) {
+    try { process.kill(-run.chromePid, 'SIGKILL'); } catch { /* already exited */ }
+    try { process.kill(run.chromePid, 'SIGKILL'); } catch { /* already exited */ }
+  }
+  if (isAlive(run.serverPid)) {
+    try { process.kill(-run.serverPid, 'SIGKILL'); } catch { /* already exited */ }
+    try { process.kill(run.serverPid, 'SIGKILL'); } catch { /* already exited */ }
+  }
+}
+
+function gitRev(root) {
+  return new Promise((resolveRev) => {
+    const child = spawn('git', ['-C', root, 'rev-parse', '--short', 'HEAD'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    child.stdout.on('data', (c) => { out += c; });
+    child.on('close', () => resolveRev(out.trim() || 'unknown'));
+    child.on('error', () => resolveRev('unknown'));
+  });
+}
+
+function sha256(buf) {
+  return createHash('sha256').update(buf).digest('hex');
+}
+
+async function waitForHttp(url, timeoutMs) {
+  const start = Date.now();
+  let last = 'not tried';
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const res = await httpGet(url);
+      if (res.status === 200) return res;
+      last = `status ${res.status}`;
+    } catch (err) {
+      last = err.message;
+    }
+    await sleep(150);
+  }
+  throw new Error(`timed out waiting for ${url} (${last})`);
+}
+
+function connectCdp(wsUrl) {
+  return new Promise((resolveConn, reject) => {
+    const ws = new WebSocket(wsUrl);
+    let nextId = 0;
+    const pending = new Map();
+    const timer = setTimeout(() => {
+      ws.close();
+      reject(new Error(`CDP websocket timeout ${wsUrl}`));
+    }, 8000);
+    ws.addEventListener('open', () => {
+      clearTimeout(timer);
+      resolveConn({
+        send(method, params = {}, sessionId) {
+          const id = ++nextId;
+          return new Promise((res, rej) => {
+            const timeout = setTimeout(() => {
+              pending.delete(id);
+              rej(new Error(`CDP timeout ${method}`));
+            }, 15000);
+            pending.set(id, { res, rej, timeout });
+            const payload = { id, method, params };
+            if (sessionId) payload.sessionId = sessionId;
+            ws.send(JSON.stringify(payload));
+          });
+        },
+        close() { ws.close(); },
+      });
+    });
+    ws.addEventListener('message', (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      if (!msg.id || !pending.has(msg.id)) return;
+      const { res, rej, timeout } = pending.get(msg.id);
+      pending.delete(msg.id);
+      clearTimeout(timeout);
+      if (msg.error) rej(new Error(`${msg.error.message || 'CDP error'} (${JSON.stringify(msg.error)})`));
+      else res(msg.result || {});
+    });
+    ws.addEventListener('error', (err) => {
+      clearTimeout(timer);
+      reject(err.error || err);
+    });
+  });
+}
+
+async function pageTarget(cdpPort, origin) {
+  const res = await httpGet(`http://127.0.0.1:${cdpPort}/json/list`);
+  const targets = JSON.parse(res.body.toString('utf8'));
+  const pages = targets.filter((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+  const match = pages.find((t) => origin && t.url && t.url.startsWith(origin))
+    || pages.find((t) => t.url && t.url.includes('kiosk.html'))
+    || pages[0];
+  if (!match) throw new Error('no Chrome page target');
+  return match;
+}
+
+async function withPage(run, fn) {
+  const target = await pageTarget(run.cdpPort, run.origin);
+  const conn = await connectCdp(target.webSocketDebuggerUrl);
+  try {
+    await conn.send('Runtime.enable');
+    await conn.send('Page.enable');
+    return await fn(conn, target);
+  } finally {
+    conn.close();
+  }
+}
+
+async function evaluate(conn, expression) {
+  const result = await conn.send('Runtime.evaluate', {
+    expression,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+  if (result.exceptionDetails) {
+    const text = result.exceptionDetails.text || result.exceptionDetails.exception?.description || 'eval failed';
+    throw new Error(text);
+  }
+  return result.result ? result.result.value : undefined;
+}
+
+async function waitFor(conn, selector, text, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const ok = await evaluate(conn, `(() => {
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return false;
+      const need = ${JSON.stringify(text || '')};
+      if (need && !(el.textContent || '').includes(need)) return false;
+      return true;
+    })()`);
+    if (ok) return;
+    await sleep(100);
+  }
+  throw new Error(`timeout waiting for ${selector}${text ? ` text ${text}` : ''}`);
+}
+
+async function clickSelector(conn, selector) {
+  const point = await evaluate(conn, `(() => {
+    const el = document.querySelector(${JSON.stringify(selector)});
+    if (!el) return { error: 'missing' };
+    el.scrollIntoView({ block: 'center', inline: 'center' });
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return { error: 'not-visible' };
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  })()`);
+  if (!point || point.error) throw new Error(`click ${selector}: ${point ? point.error : 'no result'}`);
+  await conn.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y });
+  await conn.send('Input.dispatchMouseEvent', {
+    type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1,
+  });
+  await conn.send('Input.dispatchMouseEvent', {
+    type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1,
+  });
+  return point;
+}
+
+async function selectorForRole(conn, role, name) {
+  const found = await evaluate(conn, `(() => {
+    const role = ${JSON.stringify(role)};
+    const name = ${JSON.stringify(name)};
+    const nodes = [...document.querySelectorAll('button, a, input, [role]')];
+    const matches = nodes.filter((el) => {
+      const tag = el.tagName.toLowerCase();
+      const elRole = el.getAttribute('role') || (tag === 'button' ? 'button' : tag === 'a' ? 'link' : '');
+      if (elRole !== role) return false;
+      const acc = el.getAttribute('aria-label') || (el.textContent || '').trim();
+      return acc === name;
+    });
+    if (matches.length !== 1) return { count: matches.length };
+    const el = matches[0];
+    if (el.id) return { selector: '#' + CSS.escape(el.id) };
+    const key = el.getAttribute('data-key');
+    if (key) return { selector: 'button[data-key="' + key + '"]' };
+    return { count: matches.length, error: 'no-stable-selector' };
+  })()`);
+  if (!found || found.error || !found.selector) {
+    throw new Error(`role ${role} name ${JSON.stringify(name)} matched ${found ? found.count : 0}`);
+  }
+  return found.selector;
+}
+
+function printKv(obj) {
+  for (const [k, v] of Object.entries(obj)) process.stdout.write(`${k}=${v}\n`);
+}
+
+async function cmdLaunch() {
+  const root = repoRoot();
+  const runId = process.env.MORNING_BOARD_RUN_ID || randomBytes(4).toString('hex');
+  const stateDir = stateDirFor(runId);
+  const evidenceDir = evidenceDirFor(runId);
+  if (existsSync(join(stateDir, 'run.json'))) {
+    const existing = JSON.parse(readFileSync(join(stateDir, 'run.json'), 'utf8'));
+    if (isAlive(existing.serverPid) || isAlive(existing.chromePid)) {
+      die(`run ${runId} is already up. cleanup before launching it again`);
+    }
+  }
+  mkdirSync(evidenceDir, { recursive: true });
+  mkdirSync(join(stateDir, 'chrome-profile'), { recursive: true });
+  const port = process.env.MORNING_BOARD_PORT ? Number(process.env.MORNING_BOARD_PORT) : await freePort();
+  const cdpPort = await freePort();
+  const origin = `http://127.0.0.1:${port}`;
+  const serverPid = spawnLogged('python3', ['-m', 'http.server', String(port), '--bind', '127.0.0.1'], join(stateDir, 'server.log'));
+  const chromePid = spawnLogged('google-chrome', [
+    '--headless=new',
+    '--no-sandbox',
+    '--disable-gpu',
+    '--disable-dev-shm-usage',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-extensions',
+    '--disable-sync',
+    '--mute-audio',
+    `--window-size=1366,1024`,
+    `--user-data-dir=${join(stateDir, 'chrome-profile')}`,
+    `--remote-debugging-port=${cdpPort}`,
+    '--remote-allow-origins=*',
+    'about:blank',
+  ], join(stateDir, 'chrome.log'));
+  const run = {
+    runId,
+    root,
+    port,
+    cdpPort,
+    origin,
+    url: `${origin}/kiosk.html`,
+    serverPid,
+    chromePid,
+    stateDir,
+    evidenceDir,
+    chromeProfile: join(stateDir, 'chrome-profile'),
+  };
+  writeFileSync(join(stateDir, 'run.json'), JSON.stringify(run, null, 2));
+  writeFileSync(join(evidenceDir, 'run-id.txt'), `${runId}\n`);
+  try {
+    await waitForHttp(`${origin}/kiosk.html`, 10000);
+    await waitForHttp(`http://127.0.0.1:${cdpPort}/json/version`, 10000);
+    await withPage(run, async (conn) => {
+      await conn.send('Page.enable');
+      await conn.send('Page.navigate', { url: `${origin}/` });
+      await waitFor(conn, '#gear', '', 15000);
+      const href = await evaluate(conn, 'location.href');
+      if (!String(href).includes('kiosk.html')) throw new Error(`landed on ${href}, expected kiosk.html`);
+    });
+  } catch (err) {
+    await killRecorded(run);
+    die(`launch failed: ${err.message}. see ${join(stateDir, 'chrome.log')} and server.log`);
+  }
+  writeFileSync(ACTIVE_FILE, `${runId}\n`);
+  const rev = await gitRev(root);
+  printKv({
+    ready: true,
+    run_id: runId,
+    url: run.url,
+    origin,
+    server_pid: serverPid,
+    chrome_pid: chromePid,
+    cdp_port: cdpPort,
+    git_rev: rev,
+    evidence_dir: evidenceDir,
+    state_dir: stateDir,
+  });
+  process.stderr.write(`export MORNING_BOARD_RUN_ID=${runId}\n`);
+}
+
+async function cmdDoctor(argv) {
+  const run = readRun(argv);
+  const checks = [];
+  function check(name, pass, detail) {
+    checks.push({ name, pass, detail });
+  }
+  check('server_alive', isAlive(run.serverPid), `pid ${run.serverPid}`);
+  check('chrome_alive', isAlive(run.chromePid), `pid ${run.chromePid}`);
+  const serverCmd = cmdline(run.serverPid);
+  check('server_cmdline', serverCmd.includes('http.server') && serverCmd.includes(String(run.port)), serverCmd || 'missing');
+  const chromeCmd = cmdline(run.chromePid);
+  check(
+    'chrome_cmdline',
+    chromeCmd.includes(`--remote-debugging-port=${run.cdpPort}`) && chromeCmd.includes(run.chromeProfile),
+    chromeCmd ? 'matches this run' : 'missing',
+  );
+  const httpPids = await listenPids(run.port);
+  check('port_owner', httpPids.some((pid) => isSelfOrDescendant(pid, run.serverPid)), `listeners ${httpPids.join(',') || 'none'}`);
+  const cdpPids = await listenPids(run.cdpPort);
+  check('cdp_owner', cdpPids.some((pid) => isSelfOrDescendant(pid, run.chromePid)), `listeners ${cdpPids.join(',') || 'none'}`);
+  try {
+    const kiosk = await httpGet(`${run.origin}/kiosk.html`);
+    const disk = readFileSync(join(run.root, 'kiosk.html'));
+    const body = kiosk.body.toString('utf8');
+    check('kiosk_http', kiosk.status === 200, `status ${kiosk.status}`);
+    check('kiosk_matches_disk', sha256(kiosk.body) === sha256(disk), 'sha256 of served kiosk.html');
+    check('kiosk_numpad', body.includes('id="timePad"') && body.includes('aria-label="Adult settings"') && body.includes('data-key="done"'), 'numpad and gear present');
+  } catch (err) {
+    check('kiosk_http', false, err.message);
+  }
+  try {
+    const sched = await httpGet(`${run.origin}/schedule.json`);
+    const json = JSON.parse(sched.body.toString('utf8'));
+    check('schedule_http', sched.status === 200, `status ${sched.status}`);
+    check('schedule_timezone', json.timezone === 'America/Los_Angeles', json.timezone || 'missing');
+    check('schedule_friday', json.days && json.days.friday && json.days.friday.leaveBy === '07:40' && json.days.friday.alarm === '06:30', JSON.stringify(json.days && json.days.friday));
+  } catch (err) {
+    check('schedule_http', false, err.message);
+  }
+  try {
+    const index = await httpGet(`${run.origin}/`);
+    check('index_redirect_page', index.status === 200 && index.body.toString('utf8').includes('kiosk.html'), `status ${index.status}`);
+  } catch (err) {
+    check('index_redirect_page', false, err.message);
+  }
+  try {
+    await withPage(run, async (conn, target) => {
+      check('page_url', String(target.url).includes('kiosk.html') && String(target.url).startsWith(run.origin), target.url);
+      const gear = await evaluate(conn, `!!document.querySelector('#gear') && !!document.querySelector('#timePad')`);
+      check('page_dom', gear === true, 'gear and time pad in the live document');
+      const tz = await evaluate(conn, `Intl.DateTimeFormat().resolvedOptions().timeZone`);
+      check('browser_timezone', typeof tz === 'string' && tz.length > 0, tz || 'missing');
+      run._tz = tz;
+    });
+  } catch (err) {
+    check('page_url', false, err.message);
+  }
+  const rev = await gitRev(run.root);
+  const ok = checks.every((c) => c.pass);
+  process.stdout.write(`ok=${ok}\n`);
+  process.stdout.write(`run_id=${run.runId}\n`);
+  process.stdout.write(`url=${run.url}\n`);
+  process.stdout.write(`git_rev=${rev}\n`);
+  process.stdout.write(`evidence_dir=${run.evidenceDir}\n`);
+  if (run._tz) process.stdout.write(`browser_timezone=${run._tz}\n`);
+  for (const c of checks) process.stdout.write(`check.${c.name}=${c.pass ? 'pass' : 'fail'} ${c.detail}\n`);
+  if (!ok) process.exit(1);
+}
+
+async function cmdCleanup(argv) {
+  const runId = runIdFromArgs(argv) || (existsSync(ACTIVE_FILE) ? readFileSync(ACTIVE_FILE, 'utf8').trim() : '');
+  if (!runId) die('no run id to clean up');
+  const stateDir = stateDirFor(runId);
+  const runPath = join(stateDir, 'run.json');
+  let evidenceDir = evidenceDirFor(runId);
+  let serverPid = 0;
+  let chromePid = 0;
+  if (existsSync(runPath)) {
+    const run = JSON.parse(readFileSync(runPath, 'utf8'));
+    evidenceDir = run.evidenceDir || evidenceDir;
+    serverPid = run.serverPid;
+    chromePid = run.chromePid;
+    await killRecorded(run);
+  }
+  if (existsSync(stateDir)) {
+    for (const name of readdirSync(stateDir)) {
+      const full = join(stateDir, name);
+      if (resolve(full) === resolve(evidenceDir)) continue;
+      rmSync(full, { recursive: true, force: true });
+    }
+  }
+  if (existsSync(ACTIVE_FILE) && readFileSync(ACTIVE_FILE, 'utf8').trim() === runId) rmSync(ACTIVE_FILE, { force: true });
+  const evidenceOk = existsSync(evidenceDir) && statSync(evidenceDir).isDirectory();
+  printKv({
+    cleaned: true,
+    run_id: runId,
+    evidence_dir: evidenceDir,
+    evidence_remains: evidenceOk,
+    server_alive: isAlive(serverPid),
+    chrome_alive: isAlive(chromePid),
+  });
+  if (isAlive(serverPid) || isAlive(chromePid)) process.exit(1);
+  if (!evidenceOk) process.exit(1);
+}
+
+async function cmdBrowser(argv) {
+  const action = argv[0];
+  if (!action) die('browser needs an action: open, wait, click, text, value, attr, storage, active, screenshot, snapshot');
+  const rest = argv.slice(1);
+  const run = readRun(rest);
+  const timeout = Number(argValue(rest, '--timeout') || 8000);
+  await withPage(run, async (conn) => {
+    if (action === 'open') {
+      const path = argValue(rest, '--path') || '/';
+      const url = path.startsWith('http') ? path : `${run.origin}${path.startsWith('/') ? path : `/${path}`}`;
+      await conn.send('Page.enable');
+      await conn.send('Page.navigate', { url });
+      await waitFor(conn, '#gear', '', timeout);
+      const href = await evaluate(conn, 'location.href');
+      printKv({ opened: href });
+      return;
+    }
+    if (action === 'wait') {
+      const selector = argValue(rest, '--selector');
+      if (!selector) die('wait requires --selector');
+      await waitFor(conn, selector, argValue(rest, '--text'), timeout);
+      printKv({ waited: selector, text: argValue(rest, '--text') || '' });
+      return;
+    }
+    if (action === 'click') {
+      let selector = argValue(rest, '--selector');
+      if (!selector) {
+        const role = argValue(rest, '--role');
+        const name = argValue(rest, '--name');
+        if (!role || name === null) die('click requires --selector or --role and --name');
+        selector = await selectorForRole(conn, role, name);
+      }
+      const point = await clickSelector(conn, selector);
+      printKv({ clicked: selector, x: point.x.toFixed(1), y: point.y.toFixed(1) });
+      return;
+    }
+    if (action === 'text') {
+      const selector = argValue(rest, '--selector');
+      if (!selector) die('text requires --selector');
+      const text = await evaluate(conn, `(() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        return el ? el.textContent : null;
+      })()`);
+      if (text === null) die(`missing ${selector}`);
+      process.stdout.write(`text=${JSON.stringify(text)}\n`);
+      return;
+    }
+    if (action === 'value') {
+      const selector = argValue(rest, '--selector');
+      if (!selector) die('value requires --selector');
+      const value = await evaluate(conn, `(() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        return el ? el.value : null;
+      })()`);
+      if (value === null) die(`missing ${selector}`);
+      process.stdout.write(`value=${JSON.stringify(value)}\n`);
+      return;
+    }
+    if (action === 'attr') {
+      const selector = argValue(rest, '--selector');
+      const name = argValue(rest, '--name');
+      if (!selector || !name) die('attr requires --selector and --name');
+      const value = await evaluate(conn, `(() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return { missing: true };
+        const attr = el.getAttribute(${JSON.stringify(name)});
+        return { present: attr !== null, value: attr };
+      })()`);
+      if (!value || value.missing) die(`missing ${selector}`);
+      process.stdout.write(`attr.${name}=${value.present ? JSON.stringify(value.value) : 'absent'}\n`);
+      return;
+    }
+    if (action === 'storage') {
+      const key = argValue(rest, '--key');
+      if (!key) die('storage requires --key');
+      const value = await evaluate(conn, `localStorage.getItem(${JSON.stringify(key)})`);
+      process.stdout.write(`storage.${key}=${value === null || value === undefined ? 'empty' : JSON.stringify(value)}\n`);
+      return;
+    }
+    if (action === 'active') {
+      const info = await evaluate(conn, `(() => {
+        const el = document.activeElement;
+        return { tag: el ? el.tagName : '', id: el ? el.id : '' };
+      })()`);
+      printKv({ active_tag: info.tag, active_id: info.id || '' });
+      return;
+    }
+    if (action === 'screenshot') {
+      const out = argValue(rest, '--path');
+      if (!out) die('screenshot requires --path');
+      const selector = argValue(rest, '--selector');
+      if (selector) {
+        await evaluate(conn, `(() => {
+          const el = document.querySelector(${JSON.stringify(selector)});
+          if (el) el.scrollIntoView({ block: 'center', inline: 'center' });
+        })()`);
+        await sleep(100);
+      }
+      const shot = await conn.send('Page.captureScreenshot', { format: 'png' });
+      const buf = Buffer.from(shot.data, 'base64');
+      const dest = resolve(out);
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, buf);
+      printKv({ screenshot: dest, bytes: buf.length });
+      return;
+    }
+    if (action === 'snapshot') {
+      if (!hasFlag(rest, '--aria')) die('snapshot requires --aria');
+      const out = argValue(rest, '--path');
+      if (!out) die('snapshot requires --path');
+      await conn.send('Accessibility.enable');
+      const tree = await conn.send('Accessibility.getFullAXTree');
+      const nodes = tree.nodes || [];
+      const byId = new Map(nodes.map((n) => [n.nodeId, n]));
+      const depthOf = (n) => {
+        let d = 0;
+        let p = n.parentId;
+        let guard = 0;
+        while (p && byId.has(p) && guard < 40) {
+          d += 1;
+          p = byId.get(p).parentId;
+          guard += 1;
+        }
+        return d;
+      };
+      const keep = new Set(['RootWebArea', 'button', 'textbox', 'heading', 'link', 'status']);
+      const axString = (v) => {
+        if (v == null) return '';
+        if (typeof v === 'string') return v;
+        if (typeof v.value === 'string') return v.value;
+        return '';
+      };
+      const lines = [`url=${await evaluate(conn, 'location.href')}`];
+      for (const n of nodes) {
+        if (n.ignored) continue;
+        const role = n.role && n.role.value;
+        const name = axString(n.name);
+        const value = axString(n.value) || axString((n.properties || []).find((p) => p.name === 'value')?.value);
+        if (!role || role === 'none' || role === 'generic' || role === 'InlineTextBox' || role === 'StaticText' || role === 'LineBreak') continue;
+        if (!name && !value && !keep.has(role)) continue;
+        const bits = [`${'  '.repeat(Math.min(depthOf(n), 8))}${role}`];
+        if (name) bits.push(JSON.stringify(name));
+        if (value) bits.push(`value=${JSON.stringify(value)}`);
+        lines.push(bits.join(' '));
+      }
+      const dest = resolve(out);
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, `${lines.join('\n')}\n`);
+      printKv({ snapshot: dest, lines: lines.length });
+      return;
+    }
+    die(`unknown browser action ${action}`);
+  });
+}
+
+const [cmd, ...argv] = process.argv.slice(2);
+const commands = { launch: cmdLaunch, doctor: () => cmdDoctor(argv), cleanup: () => cmdCleanup(argv), browser: () => cmdBrowser(argv) };
+if (!commands[cmd]) {
+  die('usage: control-morning-board <launch|doctor|cleanup|browser> ...');
+}
+commands[cmd]().catch((err) => die(err.stack || err.message));
