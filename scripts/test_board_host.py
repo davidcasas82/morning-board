@@ -124,7 +124,8 @@ class BoardHostTests(unittest.TestCase):
 
     def test_example_quotes_url_is_same_origin_path(self):
         example = json.loads((ROOT / "board-config.example.json").read_text(encoding="utf-8"))
-        self.assertEqual(example["quotesUrl"], "/quotes.json")
+        self.assertEqual(example["quotesUrl"], "quotes.json")
+        self.assertFalse(example["quotesUrl"].startswith("/"))
         self.assertNotIn("http://", json.dumps(example))
         self.assertNotIn("https://", example["quotesUrl"])
 
@@ -229,6 +230,13 @@ class BoardHostTests(unittest.TestCase):
             self.assertEqual(body["age_seconds"], serve.WEATHER_TTL + 45)
             self.assertEqual(body["city"], "Irvine, California")
             self.assertEqual(calls["n"], 2)
+            clock["now"] += serve.WEATHER_BACKOFF_START - 1
+            with self.get(port, "/weather.json") as response:
+                self.assertEqual(response.status, 200)
+                body = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(calls["n"], 2)
+            self.assertEqual(body["current"]["temperature_2m"], 68)
+            self.assertEqual(body["age_seconds"], serve.WEATHER_TTL + 45 + serve.WEATHER_BACKOFF_START - 1)
         finally:
             ports.close()
 
@@ -251,6 +259,63 @@ class BoardHostTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, 502)
         finally:
             ports.close()
+
+    def test_stale_upstream_down_backs_off_then_caps_and_a_success_clears_it(self):
+        clock = {"now": 0.0}
+        calls = {"n": 0}
+
+        def fetch():
+            calls["n"] += 1
+            raise OSError("upstream down")
+
+        source = serve.WeatherSource(fetch=fetch, clock=lambda: clock["now"])
+        status, body = source.payload()
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(body.decode("utf-8")), {"error": "weather unavailable"})
+        self.assertEqual(calls["n"], 1)
+        self.assertLessEqual(serve.WEATHER_TIMEOUT, 5)
+        self.assertGreater(serve.WEATHER_BACKOFF_CAP, serve.WEATHER_BACKOFF_START)
+        self.assertEqual(serve.PORT, 8780)
+
+        wait = serve.WEATHER_BACKOFF_START
+        for attempt in range(1, 8):
+            clock["now"] += wait - 0.5
+            source.payload()
+            self.assertEqual(calls["n"], attempt)
+            clock["now"] += 0.5
+            status, _body = source.payload()
+            self.assertEqual(status, 502)
+            self.assertEqual(calls["n"], attempt + 1)
+            wait = min(wait * 2, serve.WEATHER_BACKOFF_CAP)
+        self.assertEqual(wait, serve.WEATHER_BACKOFF_CAP)
+        self.assertEqual(calls["n"], 8)
+
+        def recover():
+            calls["n"] += 1
+            return self.forecast(temp=61)
+
+        source.fetch = recover
+        clock["now"] += serve.WEATHER_BACKOFF_CAP
+        status, body = source.payload()
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body.decode("utf-8"))["current"]["temperature_2m"], 61)
+        self.assertEqual(calls["n"], 9)
+
+        def down_again():
+            calls["n"] += 1
+            raise OSError("upstream down")
+
+        source.fetch = down_again
+        clock["now"] += serve.WEATHER_TTL
+        status, body = source.payload()
+        self.assertEqual(status, 200)
+        served = json.loads(body.decode("utf-8"))
+        self.assertEqual(served["current"]["temperature_2m"], 61)
+        self.assertEqual(served["age_seconds"], serve.WEATHER_TTL)
+        self.assertEqual(calls["n"], 10)
+        clock["now"] += serve.WEATHER_BACKOFF_START - 1
+        source.payload()
+        self.assertEqual(calls["n"], 10)
 
     def test_slow_weather_fetch_does_not_block_the_board(self):
         started = threading.Event()
@@ -299,9 +364,15 @@ class BoardHostTests(unittest.TestCase):
             conn.close()
 
         threading.Thread(target=hold, daemon=True).start()
+        def opener(request, timeout):
+            self.assertEqual(timeout, serve.WEATHER_TIMEOUT)
+            self.assertEqual(request.full_url, serve.FORECAST_URL)
+            hung = urllib.request.Request("http://127.0.0.1:%s/v1/forecast" % port)
+            return urllib.request.urlopen(hung, timeout=timeout)
+
         started = time.time()
         with self.assertRaises(Exception):
-            serve.fetch_forecast(url="http://127.0.0.1:%s/v1/forecast" % port)
+            serve.fetch_forecast(opener=opener)
         self.assertLess(time.time() - started, serve.WEATHER_TIMEOUT + 2)
 
     def test_forecast_url_matches_the_old_kiosk_request_and_times_out(self):
@@ -346,10 +417,17 @@ class BoardHostTests(unittest.TestCase):
     def test_kiosk_reads_weather_from_the_board(self):
         kiosk = (ROOT / "kiosk.html").read_text(encoding="utf-8")
         weather = (ROOT / "weather.js").read_text(encoding="utf-8")
-        self.assertIn('src="weather.js?v=2"', kiosk)
+        self.assertIn('src="weather.js?v=3"', kiosk)
         self.assertIn("MorningWeather.load", kiosk)
         self.assertIn(serve.FORECAST_URL, weather)
-        self.assertIn("'/weather.json'", weather)
+        self.assertIn("resolvePageUrl", weather)
+        self.assertNotIn("'/weather.json'", weather)
+        self.assertNotIn('"/weather.json"', weather)
+        self.assertIn("'weather.json'", weather)
+        self.assertIn("new URL(quoteConfig.quotesUrl, document.URL)", kiosk)
+        self.assertIn('rel="icon"', kiosk)
+        self.assertIn("data:image/gif;base64,", kiosk)
+        self.assertNotIn("favicon.ico", kiosk)
         self.assertIn("nominatim.openstreetmap.org", weather)
         self.assertIn("RETRY_MS = 60 * 1000", weather)
         self.assertIn("STALE_MS = 2 * 60 * 60 * 1000", weather)

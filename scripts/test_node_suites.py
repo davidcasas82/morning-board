@@ -12,10 +12,10 @@ ROOT = Path(__file__).resolve().parents[1]
 NODE = shutil.which("node")
 
 
-@unittest.skipIf(NODE is None, "node is not on PATH; skipped test-daily.js, test-quotes.js, and test-weather.js")
+@unittest.skipIf(NODE is None, "node is not on PATH; skipped test-daily.js, test-quotes.js, test-weather.js, and test-resolve.js")
 class NodeSuiteTests(unittest.TestCase):
     def test_node_suites_pass(self):
-        for name in ("test-daily.js", "test-quotes.js", "test-weather.js"):
+        for name in ("test-daily.js", "test-quotes.js", "test-weather.js", "test-resolve.js"):
             with self.subTest(name):
                 result = subprocess.run([NODE, name], cwd=ROOT, capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, "%s failed:\n%s%s" % (name, result.stdout, result.stderr))

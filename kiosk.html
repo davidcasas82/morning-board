@@ -5,9 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-store">
 <title>Morning board</title>
+<link rel="icon" href="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
 <script src="daily.js?v=19"></script>
 <script src="quotes.js?v=20"></script>
-<script src="weather.js?v=2"></script>
+<script src="weather.js?v=3"></script>
 <script>
 /* Style, day/night, and color before first paint.
    Each Pacific board day (local Pacific time minus 3 hours, from 3:00 AM)
@@ -3129,7 +3130,13 @@ function applyQuoteScreen(when, state) {
 
 function fetchQuoteFile() {
   if (!quoteConfig || !quoteConfig.quotesUrl) return;
-  fetch(quoteConfig.quotesUrl, { cache: 'no-store' })
+  var quoteUrl;
+  try {
+    quoteUrl = new URL(quoteConfig.quotesUrl, document.URL).href;
+  } catch (e) {
+    return;
+  }
+  fetch(quoteUrl, { cache: 'no-store' })
     .then(function (response) {
       if (!response.ok) throw new Error('status');
       return response.json();

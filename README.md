@@ -10,9 +10,9 @@ The gear on the page is today-only override and countdown preview. It does not w
 
 ## Home network host
 
-Port **8780** serves the board's own files on the LAN: `index.html`, `kiosk.html`, the `*.js` files, `schedule.json`, `board-config*.json`, `fonts/`, `/quotes.json`, and `/weather.json`. Every other path is a 404. `GET /quotes.json` on 8780 reads `~/Library/Application Support/morning-board/quotes.json`. That file is not in git. `GET /weather.json` is the Open-Meteo forecast for the house (Irvine), cached about 10 minutes; a failed refresh keeps the last good copy and its age. The page reads that same-origin path. On GitHub Pages the path 404s, and the kiosk falls back to Open-Meteo in the browser. Do not put a LAN address in the repo.
+Port **8780** serves the board's own files on the LAN: `index.html`, `kiosk.html`, the `*.js` files, `schedule.json`, `board-config*.json`, `fonts/`, `/quotes.json`, and `/weather.json`. Every other path is a 404. `GET /quotes.json` on 8780 reads `~/Library/Application Support/morning-board/quotes.json`. That file is not in git. `GET /weather.json` is the Open-Meteo forecast (Irvine), cached about 10 minutes; a failed refresh keeps the last good copy and its age, and retries back off while Open-Meteo is down. The page asks for `weather.json` next to itself. On the mini that is this route. On GitHub Pages the file is not published, that request 404s, and the kiosk falls back to Open-Meteo in the browser. Do not put a LAN address in the repo.
 
-The page requests same-origin `/quotes.json`. On GitHub Pages that URL 404s, the quote fetch fails, and the clock stays up. The example config uses that path.
+The page asks for `quotes.json` next to itself. On GitHub Pages that file is not published, the quote fetch fails, and the clock stays up. The example config uses that relative path, and a missing `board-config.json` falls back to `board-config.example.json`.
 
 This does not change the frame's start URL. Leave the frame on [the Pages board](https://davidcasas82.github.io/morning-board/) until you change it by hand.
 

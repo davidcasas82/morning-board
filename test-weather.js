@@ -69,7 +69,7 @@ function rejects(promise) {
 }
 
 async function main() {
-  var fn = scripted(fallback({ url: '/weather.json', status: 404, body: 'missing' }));
+  var fn = scripted(fallback({ url: 'weather.json', status: 404, body: 'missing' }));
   var st = weather.state();
   var data = await weather.load(st, fn);
   assert.strictEqual(data.city, 'Irvine, California');
@@ -84,14 +84,14 @@ async function main() {
   assert.ok(fn.calls[1].indexOf('models=gfs_seamless') !== -1);
   assert.strictEqual(fn.calls[1], weather.FORECAST_URL);
 
-  fn = scripted(fallback({ url: '/weather.json', throw: new Error('offline') }));
+  fn = scripted(fallback({ url: 'weather.json', throw: new Error('offline') }));
   st = weather.state();
   data = await weather.load(st, fn);
   assert.strictEqual(data.city, 'Irvine, California');
   assert.strictEqual(fn.calls.length, 3);
   assert.strictEqual(st.fromBoard, false);
 
-  fn = scripted(fallback({ url: '/weather.json', status: 200, body: '<!DOCTYPE html>not json' }));
+  fn = scripted(fallback({ url: 'weather.json', status: 200, body: '<!DOCTYPE html>not json' }));
   data = await weather.load(weather.state(), fn);
   assert.strictEqual(data.age_seconds, 0);
   assert.ok(fn.calls[1].indexOf('api.open-meteo.com') !== -1);
@@ -103,7 +103,7 @@ async function main() {
     city: 'Irvine, California',
     age_seconds: 12
   };
-  fn = scripted([{ url: '/weather.json', status: 200, body: boardBody }]);
+  fn = scripted([{ url: 'weather.json', status: 200, body: boardBody }]);
   st = weather.state();
   data = await weather.load(st, fn);
   assert.strictEqual(st.fromBoard, true);
@@ -111,16 +111,43 @@ async function main() {
   assert.strictEqual(data.city, 'Irvine, California');
   assert.strictEqual(fn.calls.length, 1);
 
-  fn = scripted([{ url: '/weather.json', throw: new Error('reset') }]);
+  fn = scripted([{ url: 'weather.json', throw: new Error('reset') }]);
   assert.strictEqual(await rejects(weather.load(st, fn)), true);
   assert.strictEqual(fn.calls.length, 1);
 
-  fn = scripted([{ url: '/weather.json', status: 502, body: { error: 'weather unavailable' } }]);
-  assert.strictEqual(await rejects(weather.load(weather.state(), fn)), true);
-  assert.strictEqual(fn.calls.length, 1);
+  fn = scripted(fallback({ url: 'weather.json', status: 502, body: { error: 'weather unavailable' } }));
+  st = weather.state();
+  data = await weather.load(st, fn);
+  assert.strictEqual(data.city, 'Irvine, California');
+  assert.strictEqual(data.current.temperature_2m, 72.2);
+  assert.strictEqual(st.fromBoard, false);
+  assert.strictEqual(fn.calls.length, 3);
+  assert.ok(fn.calls[1].indexOf('api.open-meteo.com') !== -1);
+
+  fn = scripted(fallback({ url: 'weather.json', status: 500, body: 'unavailable' }));
+  st = weather.state();
+  data = await weather.load(st, fn);
+  assert.strictEqual(data.current.temperature_2m, 72.2);
+  assert.strictEqual(st.fromBoard, false);
+  assert.strictEqual(fn.calls.length, 3);
 
   fn = scripted([
-    { url: '/weather.json', status: 404, body: '' },
+    { url: 'weather.json', status: 200, body: boardBody },
+    { url: 'weather.json', status: 502, body: { error: 'weather unavailable' } },
+    { url: 'weather.json', status: 500, body: { error: 'weather unavailable' } }
+  ]);
+  st = weather.state();
+  data = await weather.load(st, fn);
+  assert.strictEqual(st.fromBoard, true);
+  assert.strictEqual(data.age_seconds, 12);
+  assert.strictEqual(fn.calls.length, 1);
+  assert.strictEqual(await rejects(weather.load(st, fn)), true);
+  assert.strictEqual(await rejects(weather.load(st, fn)), true);
+  assert.strictEqual(fn.calls.length, 3);
+  assert.ok(fn.calls.every(function (url) { return url.indexOf('open-meteo') === -1; }));
+
+  fn = scripted([
+    { url: 'weather.json', status: 404, body: '' },
     { url: 'api.open-meteo.com', status: 200, body: forecast },
     { url: 'nominatim.openstreetmap.org', throw: new Error('geo') }
   ]);
@@ -129,7 +156,7 @@ async function main() {
   assert.strictEqual(data.current.temperature_2m, 72.2);
 
   fn = scripted([
-    { url: '/weather.json', status: 404, body: '' },
+    { url: 'weather.json', status: 404, body: '' },
     { url: 'api.open-meteo.com', status: 503, body: 'down' }
   ]);
   assert.strictEqual(await rejects(weather.load(weather.state(), fn)), true);
