@@ -3133,6 +3133,18 @@ class HealthcheckTests(unittest.TestCase):
         status = json.loads(self.status.read_text(encoding="utf-8")) if self.status.exists() else None
         return rc, out.getvalue(), status
 
+    def test_webhook_help_names_the_key(self):
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit) as raised:
+            with mock.patch("sys.stdout", buf):
+                kt.build_parser().parse_args(["healthcheck", "--help"])
+        self.assertEqual(raised.exception.code, 0)
+        text = buf.getvalue()
+        self.assertIn("--webhook", text)
+        self.assertIn("WEBHOOK_KEY", text)
+        self.assertIn("WEBHOOK_URL", text)
+        self.assertNotIn("fixture-webhook-key", text)
+
     def test_defaults_stay_under_the_patched_home(self):
         args = kt.build_parser().parse_args(["healthcheck"])
         for path in (args.status, args.ran, args.webhook, args.netcheck_log, args.job_plist, args.log):
@@ -3470,6 +3482,50 @@ class HealthcheckTests(unittest.TestCase):
         body = json.dumps(posted[0]) + json.dumps(status)
         self.assertNotIn("Not A Real Room", body)
         self.assertIn("boys-room", body)
+        self.assertFalse((self.dir / "kids-tv-alert-ack.json").exists())
+
+    def test_healthy_netcheck_leaves_sonos_sync_alerts_open(self):
+        rooms = (("boys-room", "Room One"), ("girls-room", "Room Two"))
+        self.write_run_days(dt.datetime(2026, 10, 29, 6, 20, tzinfo=LA))
+        self.alert.write_text(json.dumps({"alerts": [{
+            "date": "2026-10-29", "tv": "all", "step": "netcheck",
+            "error": "no route", "at": "2026-10-29T05:00:00-07:00"}]}))
+        self.write_net("2026-10-29 06:00:00 6 targets ok")
+        self.write_log("2026-10-29 06:18:00 boys-room: power on sent",
+                       "2026-10-29 06:18:01 girls-room: power on sent",
+                       "2026-10-29 06:19:00 boys-room: cast sent",
+                       "2026-10-29 06:19:01 girls-room: cast sent")
+        rc, _out, status = self.invoke("morning-on", "2026-10-29T06:20:00")
+        self.assertEqual((rc, status["result"]), (0, "pass"))
+        saved = json.loads(self.alert.read_text(encoding="utf-8"))["alerts"]
+        self.assertEqual(saved[0]["resolved"]["reason"], "later netcheck: 6 targets ok")
+
+        self.write_run_days(dt.datetime(2026, 11, 14, 20, 45, tzinfo=LA))
+        self.alert.write_text(json.dumps({"alerts": [
+            {"date": "2026-11-14", "tv": "all", "step": "netcheck",
+             "error": "no route", "at": "2026-11-14T11:20:00-08:00"},
+            {"date": "2026-11-14", "tv": "boys-room", "step": "sonos-sync",
+             "error": "timed out", "at": "2026-11-14T11:21:00-08:00"},
+            {"date": "2026-11-14", "tv": "girls-room", "step": "sonos-sync",
+             "error": "timed out", "at": "2026-11-14T11:22:00-08:00"},
+        ]}))
+        self.write_net("2026-11-14 11:51:00 8 targets ok\n")
+        self.write_log(
+            "2026-11-14 11:30:00 Room One: sonos alarm for 2026-11-15: already off",
+            "2026-11-14 11:30:01 Room Two: sonos alarm for 2026-11-15: already off")
+        self.invoke("evening", "2026-11-14T20:45:00")
+        saved = json.loads(self.alert.read_text(encoding="utf-8"))["alerts"]
+        by_alert = {(item["tv"], item["step"]): item for item in saved}
+        self.assertEqual(by_alert[("all", "netcheck")]["resolved"], {
+            "at": "2026-11-14T11:51:00-08:00", "reason": "later netcheck: 8 targets ok"})
+        for key, name in rooms:
+            item = by_alert[(key, "sonos-sync")]
+            self.assertEqual(item["tv"], key)
+            self.assertNotIn("resolved", item)
+            self.assertNotIn(name, json.dumps(item))
+        text = json.dumps(saved)
+        self.assertNotIn("Room One", text)
+        self.assertNotIn("Room Two", text)
         self.assertFalse((self.dir / "kids-tv-alert-ack.json").exists())
 
     def test_six_target_netcheck_is_healthy_without_sonos(self):

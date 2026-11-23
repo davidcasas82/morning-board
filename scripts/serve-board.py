@@ -10,13 +10,14 @@ outside the repo:
     ~/Library/Application Support/morning-board/quotes.json
 
 A missing quotes file is a 404. The server stays up and the clock page
-still loads. /weather.json is the Open-Meteo forecast for the house,
-fetched here with a short timeout and cached for about 10 minutes. A
-failed refresh returns that cached copy and its age. The city name is
-fixed from the default coordinates. Run it as a user LaunchAgent. It
-starts after casasmacmini-server logs in, which depends on auto-login,
-not at the boot chime. Installing it does not change the frame's start
-URL.
+still loads. /weather.json is the Open-Meteo forecast, fetched here
+with a short timeout and cached for about 10 minutes. A failed refresh
+returns that cached copy and its age. While that copy is stale and
+Open-Meteo is down, the next tries wait longer each time, up to a cap.
+The city name is fixed from the default coordinates. Run it as a user
+LaunchAgent. It starts after casasmacmini-server logs in, which depends
+on auto-login, not at the boot chime. Installing it does not change the
+frame's start URL.
 """
 
 from __future__ import annotations
@@ -39,6 +40,8 @@ DEFAULT_LAT = "33.67"
 DEFAULT_LON = "-117.82"
 WEATHER_TTL = 10 * 60
 WEATHER_TIMEOUT = 4
+WEATHER_BACKOFF_START = 30
+WEATHER_BACKOFF_CAP = 10 * 60
 WEATHER_MAX_BYTES = 1000000
 WEATHER_CITY = "Irvine, California"
 WEATHER_ERROR = b'{"error":"weather unavailable"}'
@@ -105,12 +108,12 @@ def content_type(path: Path) -> str:
     return guessed
 
 
-def fetch_forecast(url=FORECAST_URL, timeout=WEATHER_TIMEOUT, opener=None):
+def fetch_forecast(timeout=WEATHER_TIMEOUT, opener=None):
     """GET the Open-Meteo forecast. A short timeout keeps a hung upstream off the server."""
     if opener is None:
         opener = urllib.request.urlopen
     request = urllib.request.Request(
-        url,
+        FORECAST_URL,
         headers={"Accept": "application/json", "User-Agent": "morning-board"},
     )
     with opener(request, timeout=timeout) as response:
@@ -134,6 +137,8 @@ class WeatherSource:
         self._lock = threading.Lock()
         self._forecast = None
         self._fetched_at = None
+        self._backoff = None
+        self._backoff_until = None
 
     def payload(self):
         now = self.clock()
@@ -141,20 +146,40 @@ class WeatherSource:
             cached = self._cached(now, fresh_only=True)
             if cached is not None:
                 return 200, cached
+            if self._backing_off(now):
+                return self._stale_or_error(now)
         try:
             forecast = self.fetch()
-            body = self._encode(forecast, 0)
         except Exception:
+            now = self.clock()
             with self._lock:
-                cached = self._cached(self.clock(), fresh_only=False)
-                if cached is not None:
-                    return 200, cached
-            return 502, WEATHER_ERROR
+                self._note_failure(now)
+                return self._stale_or_error(now)
         now = self.clock()
         with self._lock:
             self._forecast = forecast
             self._fetched_at = now
-        return 200, body
+            self._backoff = None
+            self._backoff_until = None
+            return 200, self._encode(forecast, 0)
+
+    def _backing_off(self, now):
+        return self._backoff_until is not None and now < self._backoff_until
+
+    def _note_failure(self, now):
+        if self._backoff is None:
+            self._backoff = WEATHER_BACKOFF_START
+        else:
+            self._backoff = self._backoff * 2
+            if self._backoff > WEATHER_BACKOFF_CAP:
+                self._backoff = WEATHER_BACKOFF_CAP
+        self._backoff_until = now + self._backoff
+
+    def _stale_or_error(self, now):
+        cached = self._cached(now, fresh_only=False)
+        if cached is not None:
+            return 200, cached
+        return 502, WEATHER_ERROR
 
     def _cached(self, now, fresh_only):
         if self._forecast is None or self._fetched_at is None:

@@ -3177,7 +3177,7 @@ def build_parser() -> argparse.ArgumentParser:
                                         / "kids-tv-healthcheck-ran.json"),
                    help="which automatic checks already ran today")
     h.add_argument("--webhook", default=str(HOME / ".config" / "kids-tv" / "alert-webhook.env"),
-                   help="chmod 600 file with WEBHOOK_URL; missing means write the status file only")
+                   help="chmod 600 file with WEBHOOK_URL and WEBHOOK_KEY; missing means write the status file only")
     h.add_argument("--netcheck-log", default=str(HOME / "Library" / "Logs" / "kids-tv-helper-netcheck.log"))
     h.add_argument("--job-plist", default=str(HOME / "Library" / "LaunchAgents"
                                               / "com.davidcasas.morningboard.kids-tv.plist"))
